@@ -33,19 +33,18 @@ impl VectorStore {
         let file = File::open(vectors_bin)?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-        if mmap.len() % (DIMS * 4) != 0 {
-            bail!(
-                "vectors.bin size {} not divisible by DIMS×4 ({}×4)",
-                mmap.len(), DIMS
-            );
-        }
-        let n = mmap.len() / (DIMS * 4);
+        let (n, half) = detect_layout(vectors_bin, mmap.len())?;
 
-        // Convert f32 → f16 in-place
-        let data: Vec<f16> = mmap
-            .chunks_exact(4)
-            .map(|c| f16::from_f32(f32::from_le_bytes(c.try_into().unwrap())))
-            .collect();
+        // f32 file: convert to f16. f16 file: copy as is (the engine only ever uses f16).
+        let data: Vec<f16> = if half {
+            mmap.chunks_exact(2)
+                .map(|c| f16::from_le_bytes(c.try_into().unwrap()))
+                .collect()
+        } else {
+            mmap.chunks_exact(4)
+                .map(|c| f16::from_f32(f32::from_le_bytes(c.try_into().unwrap())))
+                .collect()
+        };
 
         let ids = resolve_ids(vectors_bin, catalog_db, n)?;
 
@@ -92,6 +91,22 @@ impl VectorStore {
         scores.truncate(k);
         scores
     }
+}
+
+/// Row count and element width of a vectors file. The default is raw f32. When the sidecar
+/// `<vectors.bin>.keys` exists and the file holds exactly keys × DIMS × 2 bytes, it is raw f16
+/// (half the size to store and download; the engine keeps f16 in memory anyway).
+pub fn detect_layout(vectors_bin: &str, file_len: usize) -> Result<(usize, bool)> {
+    if let Ok(m) = std::fs::metadata(format!("{vectors_bin}.keys")) {
+        let k = (m.len() / 4) as usize;
+        if k > 0 && file_len == k * DIMS * 2 {
+            return Ok((k, true));
+        }
+    }
+    if file_len % (DIMS * 4) != 0 {
+        bail!("vectors file size {file_len} is neither f32 ({DIMS}×4 per row) nor f16 matching the .keys sidecar");
+    }
+    Ok((file_len / (DIMS * 4), false))
 }
 
 /// Row-order keys for vectors.bin (`catalog::item_key`, unique across movies and TV).
@@ -242,4 +257,28 @@ pub fn sphere_mean(vecs: &[Vec<f32>]) -> Vec<f32> {
     }
     l2_normalize(&mut sum);
     sum
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn detects_f16_f32_and_rejects_bad_sizes() {
+        let dir = std::env::temp_dir().join(format!("pstream_layout_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("v.bin").to_string_lossy().to_string();
+
+        // no sidecar: f32
+        assert_eq!(detect_layout(&bin, 2 * DIMS * 4).unwrap(), (2, false));
+        assert!(detect_layout(&bin, 2 * DIMS * 4 + 2).is_err());
+
+        // sidecar with 3 keys: a file of 3 × DIMS × 2 bytes is f16, 3 × DIMS × 4 is still f32
+        std::fs::write(format!("{bin}.keys"), vec![0u8; 3 * 4]).unwrap();
+        assert_eq!(detect_layout(&bin, 3 * DIMS * 2).unwrap(), (3, true));
+        assert_eq!(detect_layout(&bin, 3 * DIMS * 4).unwrap(), (3, false));
+        // f16 size that does not match the key count is rejected, not guessed
+        assert!(detect_layout(&bin, 5 * DIMS * 2).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

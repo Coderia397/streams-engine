@@ -51,12 +51,18 @@ fn main() -> Result<()> {
     println!("Mapping vectors from {} ...", args.vecs.display());
     let file = fs::File::open(&args.vecs)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
-    if mmap.len() % (DIMS * 4) != 0 {
-        bail!("vectors.bin not divisible by DIMS×4");
-    }
-    let n = mmap.len() / (DIMS * 4);
-    // mmap is page aligned, so the f32 view is valid.
-    let data: &[f32] = unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const f32, n * DIMS) };
+    let (n, half) = pstream_engine::vectors::detect_layout(&args.vecs.to_string_lossy(), mmap.len())?;
+    // f16 files are widened to f32 in memory; f32 files are used straight from the mapping
+    // (mmap is page aligned, so the f32 view is valid).
+    let widened: Vec<f32>;
+    let data: &[f32] = if half {
+        widened = mmap.chunks_exact(2)
+            .map(|c| half::f16::from_le_bytes(c.try_into().unwrap()).to_f32())
+            .collect();
+        &widened
+    } else {
+        unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const f32, n * DIMS) }
+    };
     let row = |i: usize| &data[i * DIMS..(i + 1) * DIMS];
     println!("  {} × {} ({:.1}s)", n, DIMS, t0.elapsed().as_secs_f32());
 
