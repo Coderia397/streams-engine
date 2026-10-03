@@ -1,0 +1,68 @@
+[package]
+name    = "pstream-engine"
+version = "0.1.0"
+edition = "2021"
+
+# Streaming recommendation AI engine.
+# Replaces the Python search_server.py. Serves /api/feed and related routes on :8088.
+
+[[bin]]
+name = "pstream-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "cluster-seeds"
+path = "src/bin/cluster_seeds.rs"
+
+[[bin]]
+name = "embed-taxonomy"
+path = "src/bin/embed_taxonomy.rs"
+
+[[bin]]
+name = "embed-catalog"
+path = "src/bin/embed_catalog.rs"
+
+[lib]
+name = "pstream_engine"
+path = "src/lib.rs"
+
+[dependencies]
+# HTTP
+axum             = "0.8"
+tokio            = { version = "1", features = ["full"] }
+tower            = "0.5"
+tower-http       = { version = "0.7", features = ["cors"] }
+
+# Serialization
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+
+# Data / Catalog
+rusqlite         = { version = "0.40", features = ["bundled"] }   # startup load only
+arc-swap         = "1.7"                                           # lock-free catalog pointer
+memmap2          = "0.9"                                           # vector mmap
+half             = "2.4"                                           # f16 storage (~200MB)
+
+# Vector / ANN
+usearch          = "2.1"                                           # HNSW ANN index
+rayon            = "1"                                             # parallel brute-force + k-means
+
+# Shelf Alignment
+pathfinding      = "4.12"                                          # Hungarian algorithm
+
+# Cache
+moka             = { version = "0.12", features = ["future", "sync"] }    # W-TinyLFU 30s TTL
+
+# Observability
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow           = "1"
+
+# Data-prep tool deps (used by src/bin/* only, zero overhead in the engine hot path)
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+clap             = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 4
