@@ -73,35 +73,66 @@ fn fts_search(db_path: &str, q: &str, limit: usize) -> anyhow::Result<Vec<serde_
         .filter_map(|r| r.ok())
         .any(|c| c == "tmdb_id");
     let id_expr = if has_tmdb_id { "c.tmdb_id" } else { "c.id" };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity
-         FROM catalog_fts f
-         JOIN catalog c ON c.id = f.id
-         WHERE catalog_fts MATCH ?1
-         ORDER BY rank, c.popularity DESC
-         LIMIT ?2"
-    ))?;
-    let rows: Vec<serde_json::Value> = stmt.query_map(
-        rusqlite::params![format!("\"{}\"", fts_q), limit as i64],
-        |row| {
-            let genres_str: String = row.get::<_,String>(5).unwrap_or_default();
-            let genres: Vec<String> = genres_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let release_year: Option<i32> = row.get::<_,Option<String>>(6)
-                .unwrap_or(None).and_then(|s| s.parse().ok());
-            Ok(json!({
-                "id": row.get::<_,i64>(0)?,
-                "title": row.get::<_,String>(1)?,
-                "media_type": row.get::<_,String>(2)?,
-                "poster_path": row.get::<_,Option<String>>(3)?,
-                "vote_average": row.get::<_,f64>(4)?,
-                "genres": genres,
-                "release_year": release_year,
-            }))
+
+    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<(i64, serde_json::Value)> {
+        let genres_str: String = row.get::<_, Option<String>>(5).unwrap_or(None).unwrap_or_default();
+        let genres: Vec<String> = genres_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let release_year: Option<i32> = row.get::<_, Option<String>>(6)
+            .unwrap_or(None).and_then(|s| s.parse().ok());
+        Ok((row.get::<_, i64>(8)?, json!({
+            "id": row.get::<_, i64>(0)?,
+            "title": row.get::<_, String>(1)?,
+            "media_type": row.get::<_, String>(2)?,
+            "poster_path": row.get::<_, Option<String>>(3)?,
+            "vote_average": row.get::<_, f64>(4)?,
+            "genres": genres,
+            "release_year": release_year,
+        })))
+    };
+
+    // 1. titles containing the query: the 3000 best text matches (keeps very common words fast), then exact
+    //    title first, titles starting with the query next, then by popularity
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity, c.id
+             FROM (SELECT id FROM catalog_fts WHERE catalog_fts MATCH ?1 ORDER BY rank LIMIT 3000) f
+             JOIN catalog c ON c.id = f.id
+             ORDER BY (lower(c.title) = lower(?2)) DESC, (lower(c.title) LIKE lower(?2) || '%') DESC, c.popularity DESC
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![format!("title : \"{}\"", fts_q), q, limit as i64],
+            |row| map_row(row),
+        )?;
+        for r in rows.filter_map(|r| r.ok()) {
+            if seen.insert(r.0) { out.push(r.1); }
         }
-    )?.filter_map(|r| r.ok()).collect();
-    Ok(rows)
+    }
+
+    // 2. fill the rest with matches anywhere (overview, genres, director), best text match first
+    if out.len() < limit {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity, c.id
+             FROM catalog_fts f
+             JOIN catalog c ON c.id = f.id
+             WHERE catalog_fts MATCH ?1
+             ORDER BY rank, c.popularity DESC
+             LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![format!("\"{}\"", fts_q), limit as i64],
+            |row| map_row(row),
+        )?;
+        for r in rows.filter_map(|r| r.ok()) {
+            if out.len() >= limit { break; }
+            if seen.insert(r.0) { out.push(r.1); }
+        }
+    }
+    Ok(out)
 }
