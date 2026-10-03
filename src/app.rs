@@ -53,7 +53,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     }
 
     // 4. Cluster seeds
-    let seeds = ClusterSeeds::load(&config.seeds_path)?;
+    let seeds = ClusterSeeds::load(&config.seeds_path, &config.seeds_legacy_path, &catalog.load())?;
 
     // 5. CentroidVault (genre centroids from top-quality catalog items)
     let catalog_guard = catalog.load();
@@ -150,6 +150,7 @@ pub struct Config {
     pub taxonomy_bin_path:  String,
     pub taxonomy_json_path: String,
     pub seeds_path:         String,
+    pub seeds_legacy_path:  String,
     pub mood_bin_path:      String,
     pub index_path:         String,
     pub port:               u16,
@@ -166,9 +167,11 @@ impl Config {
             vectors_path:       env("VECTORS_BIN",   &format!("{base}/vectors.bin")),
             taxonomy_bin_path:  env("TAXONOMY_BIN",  &format!("{base}/taxonomy_embeddings.bin")),
             taxonomy_json_path: env("TAXONOMY_JSON", &format!("{base}/taxonomy_embeddings.json")),
-            seeds_path:         env("SEEDS_BIN",     &format!("{base}/cluster_seeds.bin")),
+            seeds_path:         env("SEEDS_BIN",     &format!("{base}/cluster_seeds_v2.bin")),
+            seeds_legacy_path:  env("SEEDS_BIN_LEGACY", &format!("{base}/cluster_seeds.bin")),
             mood_bin_path:      env("MOOD_BIN",      &format!("{base}/mood_embeddings.bin")),
-            index_path:         env("HNSW_INDEX",    &format!("{base}/hnsw_index.bin")),
+            // v2: index keys are type aware item keys; the old hnsw_index.bin holds raw ids and is left untouched
+            index_path:         env("HNSW_INDEX",    &format!("{base}/hnsw_index_v2.bin")),
             port:               env("PORT", "8088").parse().unwrap_or(8088),
         }
     }

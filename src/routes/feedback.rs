@@ -10,10 +10,12 @@ use crate::sessions::FeedbackEvent;
 pub struct FeedbackBody {
     pub session_id: String,
     pub item_id: u32,
+    /// "movie" or "tv". TMDB ids repeat across the two; without it the movie is tried first.
+    pub media_type: Option<String>,
     pub event: FeedbackEvent,
 }
 
-/// POST /api/feedback  { session_id, item_id, event: click|start|complete|like|skip }
+/// POST /api/feedback  { session_id, item_id, media_type?, event: click|start|complete|like|skip }
 /// Updates the session's decayed genre taste and seen set. Later /api/feed and
 /// /api/hero-feed calls with the same session_id reflect it.
 pub async fn feedback(
@@ -24,7 +26,7 @@ pub async fn feedback(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "session_id required"})));
     }
     let catalog = state.catalog.load();
-    let Some(item) = catalog.get(&body.item_id) else {
+    let Some(item) = crate::catalog::resolve_key(&catalog, body.item_id, body.media_type.as_deref()).and_then(|k| catalog.get(&k)) else {
         return (StatusCode::NOT_FOUND, Json(json!({"error": "item not found", "id": body.item_id})));
     };
 

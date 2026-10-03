@@ -9,7 +9,10 @@ use tracing::{info, warn};
 /// A single item in the streaming catalog.
 #[derive(Debug, Clone)]
 pub struct CatalogItem {
+    /// Internal key, unique across movies and TV (see `item_key`). Use `tmdb_id` for anything shown to clients.
     pub id: u32,
+    /// TMDB id. Movies and TV series share the same id space, so it is only unique together with `media_type`.
+    pub tmdb_id: u32,
     pub media_type: String,
     pub title: String,
     pub release_year: Option<i32>,
@@ -23,6 +26,30 @@ pub struct CatalogItem {
     pub vote_average: f32,
     pub popularity: f32,
     pub is_anime: bool,
+    /// Present only in a catalog built from the TMDB pull (catalog_v2); defaults otherwise.
+    pub vote_count: u32,
+    pub adult: bool,
+    pub original_language: String,
+    /// TMDB tv type: Scripted, Reality, Talk Show, News, Documentary, Miniseries, Video
+    pub tv_type: Option<String>,
+}
+
+/// TMDB numbers movies and TV series separately, so the same id exists in both. The engine keys every
+/// title by `item_key`: movies keep their TMDB id, TV series get the top bit set.
+pub const TV_BIT: u32 = 1 << 31;
+
+#[inline]
+pub fn item_key(media_type: &str, tmdb_id: u32) -> u32 {
+    if media_type == "tv" { tmdb_id | TV_BIT } else { tmdb_id }
+}
+
+/// Resolve a client supplied (id, media_type) to an internal key that exists in the catalog.
+/// Without a media type the movie is tried first, then the series.
+pub fn resolve_key(catalog: &CatalogMap, tmdb_id: u32, media_type: Option<&str>) -> Option<u32> {
+    match media_type {
+        Some(mt) => Some(item_key(mt, tmdb_id)).filter(|k| catalog.contains_key(k)),
+        None => [tmdb_id, tmdb_id | TV_BIT].into_iter().find(|k| catalog.contains_key(k)),
+    }
 }
 
 impl CatalogItem {
@@ -40,19 +67,34 @@ impl CatalogItem {
 pub type CatalogMap = HashMap<u32, CatalogItem>;
 pub type SharedCatalog = Arc<ArcSwap<CatalogMap>>;
 
-/// Load the entire catalog from SQLite into a HashMap keyed by TMDB ID.
+/// Load the entire catalog from SQLite into a HashMap keyed by `item_key` (type aware).
 /// This is the ONLY place SQLite is accessed — never on the request hot path.
 pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
     let conn = Connection::open(db_path)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, media_type, title, release_year, genres,
-                overview, poster_path, backdrop_path,
-                vote_average, popularity, is_anime, tagline, director
-         FROM catalog",
-    )?;
+    // catalog_v2 has `tmdb_id` (the primary key `id` there is the internal key) plus optional extra columns.
+    let cols: std::collections::HashSet<String> = conn
+        .prepare("PRAGMA table_info(catalog)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let id_col = if cols.contains("tmdb_id") { "tmdb_id" } else { "id" };
+    let opt = |name: &str, default: &str| if cols.contains(name) { name.to_string() } else { format!("{default} AS {name}") };
 
-    let mut map = HashMap::with_capacity(750_000);
+    let sql = format!(
+        "SELECT {id_col}, media_type, title, release_year, genres,
+                overview, poster_path, backdrop_path,
+                vote_average, popularity, is_anime, tagline, director,
+                {vc}, {ad}, {ol}, {tt}
+         FROM catalog",
+        vc = opt("vote_count", "0"),
+        ad = opt("adult", "0"),
+        ol = opt("original_language", "''"),
+        tt = opt("tv_type", "NULL"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+
+    let mut map = HashMap::with_capacity(900_000);
 
     let rows = stmt.query_map([], |row| {
         // genres stored as comma-separated string: "Action, Drama, Sci-Fi"
@@ -72,9 +114,13 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         // is_anime is INTEGER 0/1
         let is_anime: bool = row.get::<_, i64>(10).unwrap_or(0) != 0;
 
+        let media_type: String = row.get(1).unwrap_or_default();
+        let tmdb_id = row.get::<_, i64>(0)? as u32;
+
         Ok(CatalogItem {
-            id:            row.get::<_, i64>(0)? as u32,
-            media_type:    row.get(1).unwrap_or_default(),
+            id:            item_key(&media_type, tmdb_id),
+            tmdb_id,
+            media_type,
             title:         row.get(2).unwrap_or_default(),
             release_year,
             genres,
@@ -86,6 +132,10 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             is_anime,
             tagline:       row.get(11)?,
             director:      row.get(12)?,
+            vote_count:    row.get::<_, i64>(13).unwrap_or(0).max(0) as u32,
+            adult:         row.get::<_, i64>(14).unwrap_or(0) != 0,
+            original_language: row.get::<_, Option<String>>(15).unwrap_or(None).unwrap_or_default(),
+            tv_type:       row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty()),
         })
     })?;
 

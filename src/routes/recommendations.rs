@@ -12,12 +12,14 @@ use crate::app::AppState;
 pub struct RecsQuery {
     /// TMDB item ID to base recommendations on
     pub id: u32,
+    /// "movie" or "tv". TMDB ids repeat across the two, so send it; without it the movie is tried first.
+    pub media_type: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
 fn default_limit() -> usize { 20 }
 
-/// GET /api/recommendations?id=<tmdb_id>&limit=<n>
+/// GET /api/recommendations?id=<tmdb_id>&media_type=<movie|tv>&limit=<n>
 /// Returns items most similar to the given item via vector search.
 pub async fn recommendations(
     State(state): State<Arc<AppState>>,
@@ -25,11 +27,12 @@ pub async fn recommendations(
 ) -> impl IntoResponse {
     let catalog = state.catalog.load();
 
-    let Some(anchor_item) = catalog.get(&params.id) else {
+    let Some(anchor_key) = crate::catalog::resolve_key(&catalog, params.id, params.media_type.as_deref()) else {
         return Json(json!({"error": "item not found", "id": params.id}));
     };
+    let anchor_item = &catalog[&anchor_key];
 
-    let Some(anchor_idx) = state.vectors.index_of(params.id) else {
+    let Some(anchor_idx) = state.vectors.index_of(anchor_key) else {
         return Json(json!({"error": "no vector for item", "id": params.id}));
     };
 
@@ -41,12 +44,12 @@ pub async fn recommendations(
 
     let results: Vec<_> = similar
         .iter()
-        .filter(|(id, _)| *id != params.id) // exclude the anchor itself
+        .filter(|(id, _)| *id != anchor_key) // exclude the anchor itself
         .take(limit)
         .filter_map(|(id, sim)| {
             let item = catalog.get(id)?;
             Some(json!({
-                "id":           item.id,
+                "id":           item.tmdb_id,
                 "title":        item.title,
                 "media_type":   item.media_type,
                 "poster_path":  item.poster_path,
@@ -59,7 +62,7 @@ pub async fn recommendations(
         .collect();
 
     Json(json!({
-        "anchor": { "id": anchor_item.id, "title": anchor_item.title },
+        "anchor": { "id": anchor_item.tmdb_id, "media_type": anchor_item.media_type, "title": anchor_item.title },
         "results": results,
     }))
 }

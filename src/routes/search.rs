@@ -51,7 +51,7 @@ pub async fn search(
             items.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap());
             items.truncate(limit);
             items.iter().map(|item| json!({
-                "id": item.id, "title": item.title, "media_type": item.media_type,
+                "id": item.tmdb_id, "title": item.title, "media_type": item.media_type,
                 "poster_path": item.poster_path, "vote_average": item.vote_average,
                 "genres": item.genres, "release_year": item.release_year,
             })).collect()
@@ -65,14 +65,22 @@ fn fts_search(db_path: &str, q: &str, limit: usize) -> anyhow::Result<Vec<serde_
     let conn = Connection::open(db_path)?;
     // FTS5 MATCH query — escape quotes for safety
     let fts_q = q.replace('"', "\"\"");
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity
+    // catalog_v2 keeps the internal key in `id` (joined to the FTS table) and the TMDB id in `tmdb_id`;
+    // the legacy catalog has only `id`, which is the TMDB id.
+    let has_tmdb_id = conn
+        .prepare("PRAGMA table_info(catalog)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|c| c == "tmdb_id");
+    let id_expr = if has_tmdb_id { "c.tmdb_id" } else { "c.id" };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity
          FROM catalog_fts f
          JOIN catalog c ON c.id = f.id
          WHERE catalog_fts MATCH ?1
          ORDER BY rank, c.popularity DESC
          LIMIT ?2"
-    )?;
+    ))?;
     let rows: Vec<serde_json::Value> = stmt.query_map(
         rusqlite::params![format!("\"{}\"", fts_q), limit as i64],
         |row| {

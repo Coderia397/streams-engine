@@ -114,7 +114,10 @@ pub struct Row {
 
 #[derive(Serialize, Clone)]
 pub struct RowItem {
+    /// Internal key (`catalog::item_key`), used for dedup and session state
     pub id:           u32,
+    /// TMDB id, what clients get as `id` (only unique together with `media_type`)
+    pub tmdb_id:      u32,
     pub title:        String,
     pub media_type:   String,
     pub overview:     String,
@@ -130,6 +133,7 @@ impl RowItem {
     pub fn from_catalog(item: &CatalogItem) -> Self {
         Self {
             id:            item.id,
+            tmdb_id:       item.tmdb_id,
             title:         item.title.clone(),
             media_type:    item.media_type.clone(),
             overview:      item.overview.clone(),

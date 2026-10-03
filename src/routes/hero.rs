@@ -54,7 +54,7 @@ fn session_uniform(session: &str, id: u32) -> f64 {
 
 fn hero_item_json(item: &CatalogItem) -> Value {
     json!({
-        "id":            item.id,
+        "id":            item.tmdb_id,
         "media_type":    item.media_type,
         "title":         item.title,
         "release_year":  item.release_year.map(|y| y.to_string()),

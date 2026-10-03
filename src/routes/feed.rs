@@ -239,7 +239,7 @@ fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>) -> Vec<serde_json
             .filter(|it| !already_seen.contains(&it.id) && seen.insert(it.id))
             .map(|it| {
                 json!({
-                    "id":            it.id,
+                    "id":            it.tmdb_id,
                     "media_type":    it.media_type,
                     "title":         it.title,
                     "release_year":  it.release_year.map(|y| y.to_string()),

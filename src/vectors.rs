@@ -12,11 +12,11 @@ pub const DIMS: usize = 2560;
 
 /// In-memory vector store.
 /// Vectors kept as f16 (~512 MB for 100k × 2560).
-/// IDs derived from catalog.db (top-N by popularity DESC) — same order as embedding pipeline.
+/// Keys (type aware ids) come from the sidecar `<vectors.bin>.keys`, see `resolve_ids`.
 pub struct VectorStore {
     /// Flat f16 buffer: row i starts at i * DIMS
     pub data:      Vec<f16>,
-    /// TMDB IDs parallel to data rows (index_of uses a fast HashMap)
+    /// Item keys (`catalog::item_key`) parallel to data rows (index_of uses a fast HashMap)
     pub ids:       Vec<u32>,
     id_to_idx:     HashMap<u32, usize>,
     pub n_vecs:    usize,
@@ -94,45 +94,85 @@ impl VectorStore {
     }
 }
 
-/// Row-order IDs for vectors.bin. Reads the sidecar `<vectors.bin>.ids` (u32 LE)
-/// when present. Otherwise derives the order from catalog.db (popularity DESC,
-/// the embedding pipeline order) and freezes it into the sidecar, so later
-/// catalog changes cannot shift which ID a vector belongs to.
+/// Row-order keys for vectors.bin (`catalog::item_key`, unique across movies and TV).
+/// Order of preference:
+///  1. sidecar `<vectors.bin>.keys` (u32 LE keys), written by the embedding pipeline or by step 2
+///  2. legacy sidecar `<vectors.bin>.ids` (u32 LE raw TMDB ids from before the movie/TV collision fix),
+///     converted through catalog.db and frozen into `.keys`
+///  3. derived from catalog.db (popularity DESC, the embedding pipeline order), frozen into `.keys`
 pub fn resolve_ids(vectors_bin: &str, catalog_db: &str, n: usize) -> Result<Vec<u32>> {
-    let sidecar = format!("{vectors_bin}.ids");
-    if let Ok(bytes) = std::fs::read(&sidecar) {
+    use crate::catalog::item_key;
+    let keys_path = format!("{vectors_bin}.keys");
+    let legacy_path = format!("{vectors_bin}.ids");
+
+    if let Ok(bytes) = std::fs::read(&keys_path) {
         if bytes.len() == n * 4 {
-            info!("Vector IDs read from {sidecar}");
-            return Ok(bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                .collect());
+            info!("Vector keys read from {keys_path}");
+            return Ok(bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect());
         }
-        tracing::warn!("{sidecar} has {} ids, vectors.bin has {n} — ignoring sidecar", bytes.len() / 4);
+        tracing::warn!("{keys_path} has {} keys, vectors.bin has {n} — ignoring it", bytes.len() / 4);
     }
 
     let conn = Connection::open(catalog_db)?;
-    let mut stmt = conn.prepare("SELECT id FROM catalog ORDER BY popularity DESC LIMIT ?1")?;
-    let ids: Vec<u32> = stmt
-        .query_map([n as i64], |row| row.get::<_, i64>(0).map(|id| id as u32))?
+    let has_tmdb_id = conn
+        .prepare("PRAGMA table_info(catalog)")?
+        .query_map([], |r| r.get::<_, String>(1))?
         .filter_map(|r| r.ok())
-        .collect();
-    if ids.len() != n {
-        bail!(
-            "Expected {} IDs from catalog but got {} (catalog may have fewer items than vectors)",
-            n, ids.len()
-        );
-    }
+        .any(|c| c == "tmdb_id");
+    let id_col = if has_tmdb_id { "tmdb_id" } else { "id" };
+
+    let keys: Vec<u32> = if let Some(raw) = std::fs::read(&legacy_path).ok().filter(|b| b.len() == n * 4) {
+        // legacy raw ids: every raw id was unique in the old catalog, so the media type is found by lookup
+        let mut stmt = conn.prepare(&format!("SELECT {id_col}, media_type FROM catalog"))?;
+        let by_raw: HashMap<u32, u32> = stmt
+            .query_map([], |r| {
+                let id = r.get::<_, i64>(0)? as u32;
+                let mt: String = r.get(1).unwrap_or_default();
+                Ok((id, item_key(&mt, id)))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut missing = 0usize;
+        let keys: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .map(|id| *by_raw.get(&id).unwrap_or_else(|| { missing += 1; &id }))
+            .collect();
+        if missing > 0 {
+            tracing::warn!("{missing} legacy vector ids not found in catalog.db, kept as movie keys");
+        }
+        info!("Legacy vector ids converted to type aware keys ({legacy_path})");
+        keys
+    } else {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {id_col}, media_type FROM catalog ORDER BY popularity DESC LIMIT ?1"
+        ))?;
+        let keys: Vec<u32> = stmt
+            .query_map([n as i64], |row| {
+                let id = row.get::<_, i64>(0)? as u32;
+                let mt: String = row.get(1).unwrap_or_default();
+                Ok(item_key(&mt, id))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        if keys.len() != n {
+            bail!(
+                "Expected {} IDs from catalog but got {} (catalog may have fewer items than vectors)",
+                n, keys.len()
+            );
+        }
+        keys
+    };
 
     let mut bytes = Vec::with_capacity(n * 4);
-    for id in &ids {
-        bytes.extend_from_slice(&id.to_le_bytes());
+    for k in &keys {
+        bytes.extend_from_slice(&k.to_le_bytes());
     }
-    let tmp = format!("{sidecar}.tmp");
+    let tmp = format!("{keys_path}.tmp");
     std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &sidecar)?;
-    info!("Vector IDs derived from catalog.db and frozen to {sidecar}");
-    Ok(ids)
+    std::fs::rename(&tmp, &keys_path)?;
+    info!("Vector keys frozen to {keys_path}");
+    Ok(keys)
 }
 
 impl VectorStore {

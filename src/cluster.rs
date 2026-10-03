@@ -31,11 +31,20 @@ impl ClusterSeeds {
         Arc::new(Self { seeds: vec![] })
     }
 
-    pub fn load(path: &str) -> Result<Arc<Self>> {
-        if !std::path::Path::new(path).exists() {
-            tracing::warn!("cluster_seeds.bin not found at {path} — feed will use brute-force fallback");
+    /// Load `cluster_seeds_v2.bin` (member keys from `catalog::item_key`). When it is absent the legacy
+    /// `cluster_seeds.bin` (raw TMDB ids, written before the movie/TV collision fix) is read instead and its
+    /// member ids are converted to keys through the catalog.
+    pub fn load(path: &str, legacy_path: &str, catalog: &crate::catalog::CatalogMap) -> Result<Arc<Self>> {
+        let (use_path, legacy) = if std::path::Path::new(path).exists() {
+            (path, false)
+        } else if std::path::Path::new(legacy_path).exists() {
+            tracing::warn!("{path} not found — reading legacy {legacy_path} and converting ids to keys");
+            (legacy_path, true)
+        } else {
+            tracing::warn!("cluster seeds not found at {path} — feed will use brute-force fallback");
             return Ok(Self::empty());
-        }
+        };
+        let path = use_path;
 
         let bytes = std::fs::read(path)?;
         let mut pos = 0usize;
@@ -70,6 +79,20 @@ impl ClusterSeeds {
             pos += n_members * 4;
 
             seeds.push(ClusterSeed { centroid, member_ids });
+        }
+
+        if legacy {
+            let by_raw: std::collections::HashMap<u32, u32> =
+                catalog.values().map(|it| (it.tmdb_id, it.id)).collect();
+            let mut dropped = 0usize;
+            for seed in &mut seeds {
+                seed.member_ids = seed.member_ids.iter()
+                    .filter_map(|raw| { let k = by_raw.get(raw).copied(); if k.is_none() { dropped += 1; } k })
+                    .collect();
+            }
+            if dropped > 0 {
+                tracing::warn!("{dropped} legacy seed members not found in the catalog were dropped");
+            }
         }
 
         info!("ClusterSeeds loaded: {} seeds", seeds.len());
