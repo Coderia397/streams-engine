@@ -1,4 +1,4 @@
-/// Rust binary: offline spherical k-means → cluster_seeds_v2.bin (member ids are type aware keys)
+/// Rust binary: offline spherical k-means → <vectors file>.seeds (member ids are type aware keys)
 ///
 /// Usage:
 ///   cluster-seeds --vecs /pstream-catalog/vectors.bin \
@@ -162,7 +162,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let out_path = args.out_dir.join("cluster_seeds_v2.bin");
+    let out_path = args.out_dir.join(format!("{}.seeds", args.vecs.file_name().unwrap().to_string_lossy()));
     fs::write(&out_path, &out)?;
     println!(
         "\nWritten {} clusters → {} ({:.1} MB, {:.0}s total)",

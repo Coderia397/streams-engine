@@ -70,7 +70,13 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
 
     // 7. HNSW index
     let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
-    if std::path::Path::new(&config.index_path).exists() {
+    let stamp = vectors_stamp(&config.vectors_path);
+    let stamp_file = format!("{}.stamp", config.index_path);
+    let stamp_ok = std::fs::read_to_string(&stamp_file).map(|s| s.trim() == stamp).unwrap_or(false);
+    if std::path::Path::new(&config.index_path).exists() && !stamp_ok {
+        tracing::warn!("HNSW index has no matching stamp for {} — it was built from other vectors, rebuilding", config.vectors_path);
+    }
+    if std::path::Path::new(&config.index_path).exists() && stamp_ok {
         match HnswIndex::load(&config.index_path) {
             Ok(idx) if idx.len() * 100 >= vectors.n_vecs * 95 => {
                 *hnsw_slot.write().await = Some(idx);
@@ -86,7 +92,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     }
 
     if !ENGINE_READY.load(Ordering::Relaxed) {
-        spawn_hnsw_build(hnsw_slot.clone(), vectors.clone(), config.index_path.clone());
+        spawn_hnsw_build(hnsw_slot.clone(), vectors.clone(), config.index_path.clone(), stamp.clone());
     }
 
     // 8. Feed cache (W-TinyLFU, 30s TTL)
@@ -162,17 +168,38 @@ impl Config {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
         }
         let base = env("CATALOG_DIR", "/Users/ibrahim/pstream-catalog");
+        // The rebuilt catalog and vectors are picked up automatically when present.
+        let pick = |v2: &str, v1: &str| {
+            if std::path::Path::new(&format!("{base}/{v2}")).exists() { format!("{base}/{v2}") } else { format!("{base}/{v1}") }
+        };
+        let vectors_path = env("VECTORS_BIN", &pick("vectors_v2.bin", "vectors.bin"));
+        // The index and the cluster seeds are only valid for the vectors file they were built from,
+        // so their default names derive from it. A new vectors file never reuses an old index.
         Self {
-            db_path:            env("CATALOG_DB",    &format!("{base}/catalog.db")),
-            vectors_path:       env("VECTORS_BIN",   &format!("{base}/vectors.bin")),
+            db_path:            env("CATALOG_DB",    &pick("catalog_v2.db", "catalog.db")),
             taxonomy_bin_path:  env("TAXONOMY_BIN",  &format!("{base}/taxonomy_embeddings.bin")),
             taxonomy_json_path: env("TAXONOMY_JSON", &format!("{base}/taxonomy_embeddings.json")),
-            seeds_path:         env("SEEDS_BIN",     &format!("{base}/cluster_seeds_v2.bin")),
-            seeds_legacy_path:  env("SEEDS_BIN_LEGACY", &format!("{base}/cluster_seeds.bin")),
+            seeds_path:         env("SEEDS_BIN",     &format!("{vectors_path}.seeds")),
+            // seeds written before the type aware keys; valid only for the original vectors.bin
+            seeds_legacy_path:  env("SEEDS_BIN_LEGACY", &if vectors_path.ends_with("/vectors.bin") { format!("{base}/cluster_seeds.bin") } else { String::new() }),
             mood_bin_path:      env("MOOD_BIN",      &format!("{base}/mood_embeddings.bin")),
-            // v2: index keys are type aware item keys; the old hnsw_index.bin holds raw ids and is left untouched
-            index_path:         env("HNSW_INDEX",    &format!("{base}/hnsw_index_v2.bin")),
+            index_path:         env("HNSW_INDEX",    &format!("{vectors_path}.hnsw")),
             port:               env("PORT", "8088").parse().unwrap_or(8088),
+            vectors_path,
         }
+    }
+}
+
+/// Identity of a vectors file (size and modification time). Stored next to the HNSW index so an index
+/// built from other vectors is never loaded.
+pub fn vectors_stamp(path: &str) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let secs = m.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            format!("{}:{}", m.len(), secs)
+        }
+        Err(_) => String::new(),
     }
 }

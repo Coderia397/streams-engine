@@ -116,6 +116,7 @@ pub fn spawn_hnsw_build(
     hnsw_slot: Arc<tokio::sync::RwLock<Option<HnswIndex>>>,
     store: Arc<VectorStore>,
     index_path: String,
+    stamp: String,
 ) {
     tokio::spawn(async move {
         warn!("HNSW index missing or stale — building over {} vectors in background. Serving brute force.", store.n_vecs);
@@ -123,6 +124,8 @@ pub fn spawn_hnsw_build(
             Ok(Ok(idx)) => {
                 if let Err(e) = idx.save(&index_path) {
                     warn!("Failed to persist HNSW index: {e}");
+                } else if let Err(e) = std::fs::write(format!("{index_path}.stamp"), &stamp) {
+                    warn!("Failed to write HNSW stamp: {e}");
                 }
                 let mut slot = hnsw_slot.write().await;
                 *slot = Some(idx);
