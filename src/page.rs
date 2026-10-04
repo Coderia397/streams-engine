@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 /// Rules that keep defects out of default pages: tile art required, no news, talk or soap in default rows,
 /// no Christmas or Halloween titles outside their window. `ENGINE_SAFETY_NETS=off` disables them for baselines.
 pub static SAFETY_NETS: AtomicBool = AtomicBool::new(true);
-fn safety_nets() -> bool {
+pub fn safety_nets() -> bool {
     SAFETY_NETS.load(Ordering::Relaxed)
 }
 
@@ -227,10 +227,13 @@ impl<'a> PageContext<'a> {
     /// News, talk and soap never fill default rows (a page that asks for them keeps them); seasonal titles only
     /// appear inside their window (the Halloween page lifts the Halloween rule).
     fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
-        use crate::catalog::{FLAG_CHRISTMAS, FLAG_HALLOWEEN, FLAG_NONSCRIPTED, FLAG_WRESTLING_EVENT};
+        use crate::catalog::{FLAG_CHRISTMAS, FLAG_HALLOWEEN, FLAG_NONSCRIPTED, FLAG_SUGGESTIVE, FLAG_WRESTLING_EVENT};
         let f = item.flags;
         if f == 0 {
             return true;
+        }
+        if f & FLAG_SUGGESTIVE != 0 {
+            return false;
         }
         if f & FLAG_NONSCRIPTED != 0 && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
             return false;

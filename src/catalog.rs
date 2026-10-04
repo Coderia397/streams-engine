@@ -46,6 +46,7 @@ pub const FLAG_CHRISTMAS: u8 = 1;
 pub const FLAG_HALLOWEEN: u8 = 2;
 pub const FLAG_WRESTLING_EVENT: u8 = 4;
 pub const FLAG_NONSCRIPTED: u8 = 8; // news, talk, soap
+pub const FLAG_SUGGESTIVE: u8 = 16; // ecchi, harem, softcore, erotic: not for billboards, Top 10 or default rows
 
 fn compute_flags(title: &str, keywords: &[String], tv_type: Option<&str>) -> u8 {
     let t = title.to_lowercase();
@@ -63,6 +64,13 @@ fn compute_flags(title: &str, keywords: &[String], tv_type: Option<&str>) -> u8 
     }
     if matches!(tv_type, Some("News") | Some("Talk Show") | Some("Soap")) {
         f |= FLAG_NONSCRIPTED;
+    }
+    const SUGGESTIVE: &[&str] = &[
+        "ecchi", "harem", "reverse harem", "softcore", "eroticism", "erotic", "erotic movie", "erotic thriller", "sex", "sex comedy",
+        "nudity", "sexy", "pornography", "stripper", "brothel", "hentai", "sexual humor",
+    ];
+    if keywords.iter().any(|k| SUGGESTIVE.contains(&k.as_str())) {
+        f |= FLAG_SUGGESTIVE;
     }
     f
 }

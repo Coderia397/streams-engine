@@ -110,6 +110,7 @@ pub async fn hero_feed(
                 && (nonscripted_ok || !i.genres.iter().any(|g| EXCLUDED_GENRES.iter().any(|x| g.eq_ignore_ascii_case(x))))
                 && i.overview_chars() >= MIN_OVERVIEW_CHARS
                 && media_type.map_or(true, |m| i.media_type == m)
+                && (!crate::page::safety_nets() || i.flags & crate::catalog::FLAG_SUGGESTIVE == 0)
                 && genre_spec.as_ref().map_or(true, |spec| spec.matches(i))
         })
         .collect();
