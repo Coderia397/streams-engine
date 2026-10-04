@@ -11,5 +11,8 @@ pub async fn health() -> impl IntoResponse {
     } else {
         ("degraded_brute_force", StatusCode::OK)
     };
-    (status, Json(json!({ "status": mode, "engine": "pstream-engine" })))
+    // date of the popularity overlay in use (yyyymmdd), so a check can warn when the daily refresh stops
+    let asof = crate::catalog::POPULARITY_ASOF.load(std::sync::atomic::Ordering::Relaxed);
+    let asof = if asof == 0 { serde_json::Value::Null } else { json!(asof) };
+    (status, Json(json!({ "status": mode, "engine": "pstream-engine", "popularity_asof": asof })))
 }

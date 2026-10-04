@@ -1,6 +1,7 @@
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,6 +109,45 @@ impl CatalogItem {
 pub type CatalogMap = HashMap<u32, CatalogItem>;
 pub type SharedCatalog = Arc<ArcSwap<CatalogMap>>;
 
+/// Date (yyyymmdd) of the popularity overlay in use, 0 when there is none. Shown by /api/health.
+pub static POPULARITY_ASOF: AtomicU32 = AtomicU32::new(0);
+
+/// Daily freshness: `popularity_refresh.db` next to the catalog (written by ai-engine/scripts/refresh_popularity.py from
+/// TMDB's daily export) replaces the stored popularity, so the Top 10, trending and ranking follow TMDB day by day.
+/// A missing or unreadable file leaves the catalog as it is. Re-read on every catalog reload (every 5 minutes).
+fn apply_popularity_overlay(map: &mut CatalogMap, db_path: &str) {
+    let Some(dir) = std::path::Path::new(db_path).parent() else { return };
+    let path = dir.join("popularity_refresh.db");
+    if !path.exists() {
+        return;
+    }
+    let result = (|| -> anyhow::Result<(usize, u32)> {
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let asof: String = conn.query_row("SELECT v FROM meta WHERE k='asof'", [], |r| r.get(0))?;
+        let digits: u32 = asof.replace('-', "").parse().unwrap_or(0);
+        let mut stmt = conn.prepare("SELECT media_type, id, popularity FROM pop")?;
+        let mut rows = stmt.query([])?;
+        let mut n = 0usize;
+        while let Some(r) = rows.next()? {
+            let mt: String = r.get(0)?;
+            let id: i64 = r.get(1)?;
+            let pop: f64 = r.get(2)?;
+            if let Some(item) = map.get_mut(&item_key(&mt, id as u32)) {
+                item.popularity = pop as f32;
+                n += 1;
+            }
+        }
+        Ok((n, digits))
+    })();
+    match result {
+        Ok((n, digits)) => {
+            POPULARITY_ASOF.store(digits, Ordering::Relaxed);
+            info!("Popularity overlay applied to {n} titles (as of {digits})");
+        }
+        Err(e) => warn!("Popularity overlay not applied: {e}"),
+    }
+}
+
 /// Parse a JSON array of strings (catalog_v2 stores lists that way). Empty on null or bad input.
 fn json_list(raw: Option<String>, lower: bool) -> Vec<String> {
     raw.and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok())
@@ -203,6 +243,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         map.insert(item.id, item);
     }
 
+    apply_popularity_overlay(&mut map, db_path);
     info!("Catalog loaded: {} items", map.len());
     Ok(map)
 }
@@ -272,6 +313,33 @@ mod tests {
         assert_eq!(resolve_key(&map, 1396, Some("movie")), Some(1396));
         assert_eq!(resolve_key(&map, 1396, None), Some(1396), "movie first without a media type");
         assert_eq!(resolve_key(&map, 999, None), None);
+    }
+
+    #[test]
+    fn popularity_overlay_replaces_stored_popularity() {
+        let path = temp_db("overlay");
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE catalog (id INTEGER PRIMARY KEY, tmdb_id INTEGER, media_type TEXT, title TEXT, release_year TEXT,
+               genres TEXT, overview TEXT, poster_path TEXT, backdrop_path TEXT, vote_average REAL, popularity REAL,
+               is_anime INTEGER, tagline TEXT, director TEXT);
+             INSERT INTO catalog VALUES (550, 550, 'movie', 'Fight Club', '1999', 'Drama', 'o', '/p', '/b', 8.4, 5.0, 0, '', '');
+             INSERT INTO catalog VALUES (2147484198, 550, 'tv', 'Some Show', '2020', 'Drama', 'o', '/p', '/b', 7.0, 5.0, 0, '', '');",
+        ).unwrap();
+        drop(c);
+        let dir = std::path::Path::new(&path).parent().unwrap();
+        let o = Connection::open(dir.join("popularity_refresh.db")).unwrap();
+        o.execute_batch(
+            "CREATE TABLE pop (media_type TEXT, id INTEGER, popularity REAL, PRIMARY KEY (media_type, id));
+             CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
+             INSERT INTO pop VALUES ('movie', 550, 77.5);
+             INSERT INTO meta VALUES ('asof', '2026-10-04');",
+        ).unwrap();
+        drop(o);
+        let map = load_catalog(&path).unwrap();
+        assert_eq!(map[&550].popularity, 77.5, "movie overlaid");
+        assert_eq!(map[&(550 | TV_BIT)].popularity, 5.0, "the series with the same id is not touched");
+        assert_eq!(POPULARITY_ASOF.load(Ordering::Relaxed), 20261004);
     }
 
     #[test]
