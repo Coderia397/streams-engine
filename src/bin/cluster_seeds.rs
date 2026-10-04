@@ -27,6 +27,9 @@ struct Args {
     #[arg(long, default_value_t = 120_000)] sample: usize,
     /// Members kept per cluster (closest to the centroid first).
     #[arg(long, default_value_t = 300)]  max_members: usize,
+    /// Train and assign on the quality pool only (the titles rows can show). Without it every vector is used,
+    /// which also clusters the unrated tail that no row ever draws from.
+    #[arg(long)] pool: bool,
     #[arg(long)] out_dir: PathBuf,
     #[arg(long, default_value_t = 42)]   seed:  u64,
 }
@@ -70,9 +73,21 @@ fn main() -> Result<()> {
     let ids = resolve_ids(&args.vecs.to_string_lossy(), &args.db.to_string_lossy(), n)?;
 
     // Rows with a near zero norm are failed-embedding placeholders: skip them.
+    let in_pool: Option<std::collections::HashSet<u32>> = if args.pool {
+        let catalog = pstream_engine::catalog::load_catalog(&args.db.to_string_lossy())?;
+        let set: std::collections::HashSet<u32> = catalog
+            .values()
+            .filter(|it| pstream_engine::page::passes_member_quality(it))
+            .map(|it| it.id)
+            .collect();
+        println!("  quality pool: {} titles", set.len());
+        Some(set)
+    } else {
+        None
+    };
     let valid: Vec<usize> = (0..n)
         .into_par_iter()
-        .filter(|&i| dot(row(i), row(i)) > 0.5)
+        .filter(|&i| dot(row(i), row(i)) > 0.5 && in_pool.as_ref().map_or(true, |p| p.contains(&ids[i])))
         .collect();
     println!("  {} valid vectors, {} zero placeholders", valid.len(), n - valid.len());
 

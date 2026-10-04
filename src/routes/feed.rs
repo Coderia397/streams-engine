@@ -59,6 +59,23 @@ fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &cra
     (pool / (ROW_TITLES * SESSION_TURNOVER)).min(NETFLIX_ROWS_CAP)
 }
 
+/// The pool size only changes when the catalog reloads, so it is cached per surface, genre rule and catalog size.
+fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &crate::genre_spec::GenreSpec) -> usize {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CAPS: OnceLock<Mutex<std::collections::HashMap<String, (usize, Instant)>>> = OnceLock::new();
+    let key = format!("{surface}|{spec:?}|{}", catalog.len());
+    let map = CAPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some((v, at)) = map.lock().unwrap().get(&key) {
+        if at.elapsed() < Duration::from_secs(600) {
+            return *v;
+        }
+    }
+    let v = genre_row_cap(catalog, surface, spec);
+    map.lock().unwrap().insert(key, (v, Instant::now()));
+    v
+}
+
 fn normalize_surface(s: &str) -> &'static str {
     match s {
         "movie" | "movies" | "films" | "film" => "movie",
@@ -169,7 +186,7 @@ pub async fn feed(
     let catalog = state.catalog.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
     let cap = match &genre_spec {
-        Some(spec) => genre_row_cap(&catalog, surface, spec),
+        Some(spec) => genre_row_cap_cached(&catalog, surface, spec),
         None => NETFLIX_ROWS_CAP,
     };
     let target_rows = (offset + per_page).min(cap.max(MIN_ROWS_FLOOR)).max(MIN_ROWS_FLOOR);

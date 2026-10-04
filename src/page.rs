@@ -267,18 +267,22 @@ impl<'a> PageContext<'a> {
         scored_seeds.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
         // ── Thematic rows from cluster seeds ──────────────────────────────────
+        let t_seed_loop = std::time::Instant::now();
+        let (mut n_visit, mut n_similar, mut n_empty, mut n_genre, mut n_mmr, mut n_items, mut n_row) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         for (_, seed_idx) in &scored_seeds {
             if rows.len() >= self.target_rows + 1 {
                 break; // +1 for trending row
             }
 
             let seed = &self.seeds.seeds[*seed_idx];
+            n_visit += 1;
 
             // MMD inter-anchor gate: reject if too similar to any placed centroid
             let too_similar = thematic_centroids
                 .iter()
                 .any(|c| cosine_sim(&seed.centroid, c) > MMD_MAX_INTER_SIM);
             if too_similar {
+                n_similar += 1;
                 continue;
             }
 
@@ -291,6 +295,7 @@ impl<'a> PageContext<'a> {
                 .collect();
 
             if cand_items.is_empty() {
+                n_empty += 1;
                 continue;
             }
 
@@ -302,6 +307,7 @@ impl<'a> PageContext<'a> {
             // Checked before any vector work so rejected seeds stay cheap.
             // A genre filtered page is one genre by design, so the rule does not apply.
             if self.genre.is_none() && !state.can_place_genre(&dominant_genre) {
+                n_genre += 1;
                 continue;
             }
 
@@ -329,6 +335,7 @@ impl<'a> PageContext<'a> {
                 .iter()
                 .map(|(item, vec)| (item.id, vec.clone()))
                 .collect();
+            n_mmr += 1;
             let selected_ids =
                 greedy_mmr(&seed.centroid, &candidates, ROW_SIZE * 2, MMR_LAMBDA);
 
@@ -351,6 +358,7 @@ impl<'a> PageContext<'a> {
                 COHERENCE_MIN_ITEMS
             };
             if fil_ids.len() < min_items {
+                n_items += 1;
                 continue;
             }
 
@@ -369,6 +377,7 @@ impl<'a> PageContext<'a> {
             }
 
             // Record state
+            n_row += 1;
             let row_index = rows.len();
             thematic_row_indices.push(row_index);
             thematic_centroids.push(centroid.clone());
@@ -381,6 +390,11 @@ impl<'a> PageContext<'a> {
                 items:     row_items,
             });
         }
+
+        tracing::debug!(
+            "seed loop: {:.0} ms, visited {n_visit}, too similar {n_similar}, no members {n_empty}, genre window {n_genre}, mmr runs {n_mmr}, too few items {n_items}, rows {n_row}",
+            t_seed_loop.elapsed().as_secs_f64() * 1000.0
+        );
 
         // ── Optional BYW row ──────────────────────────────────────────────────
         // Only added if there's a taste vector. Anchor must be thematically
@@ -834,10 +848,17 @@ impl<'a> PageContext<'a> {
             .values()
             .filter(|item| self.matches_filters(item))
             .collect();
-        items.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap());
+        // Only the top ROW_SIZE are needed: select them in linear time instead of sorting the whole catalog
+        let by_pop_desc = |a: &&CatalogItem, b: &&CatalogItem| {
+            b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal)
+        };
+        if items.len() > ROW_SIZE {
+            items.select_nth_unstable_by(ROW_SIZE - 1, by_pop_desc);
+            items.truncate(ROW_SIZE);
+        }
+        items.sort_unstable_by(by_pop_desc);
         let row_items: Vec<RowItem> = items
             .into_iter()
-            .take(ROW_SIZE)
             .map(RowItem::from_catalog)
             .collect();
 
