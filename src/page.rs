@@ -227,26 +227,25 @@ impl<'a> PageContext<'a> {
     /// News, talk and soap never fill default rows (a page that asks for them keeps them); seasonal titles only
     /// appear inside their window (the Halloween page lifts the Halloween rule).
     fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
-        let nonscripted = matches!(item.tv_type.as_deref(), Some("News") | Some("Talk Show") | Some("Soap"));
-        if nonscripted && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
+        use crate::catalog::{FLAG_CHRISTMAS, FLAG_HALLOWEEN, FLAG_NONSCRIPTED, FLAG_WRESTLING_EVENT};
+        let f = item.flags;
+        if f == 0 {
+            return true;
+        }
+        if f & FLAG_NONSCRIPTED != 0 && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
             return false;
         }
         // pay per view wrestling events are not default home content (the Sports page keeps them)
-        let wrestling_event = item.keywords.iter().any(|k| k == "pro wrestling" || k == "professional wrestling")
-            || ["wwe ", "wwf ", "wcw ", "wrestlemania", "summerslam", "royal rumble", "survivor series"].iter().any(|w| item.title.to_lowercase().contains(w));
-        if wrestling_event && !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Sports)) {
+        if f & FLAG_WRESTLING_EVENT != 0 && !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Sports)) {
             return false;
         }
         let (m, d) = self.today;
         let md = (m as u32) * 100 + d as u32;
-        let t = item.title.to_lowercase();
-        let christmas = item.keywords.iter().any(|k| k.contains("christmas")) || t.contains("christmas") || t.contains("xmas") || t.contains("santa claus");
-        if christmas && !(md >= 1120 || md <= 106) {
+        if f & FLAG_CHRISTMAS != 0 && !(md >= 1120 || md <= 106) {
             return false;
         }
-        let halloween = item.keywords.iter().any(|k| k.contains("halloween")) || t.contains("halloween");
         let halloween_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Halloween));
-        if halloween && !halloween_page && !(md >= 1001 && md <= 1101) {
+        if f & FLAG_HALLOWEEN != 0 && !halloween_page && !(md >= 1001 && md <= 1101) {
             return false;
         }
         true

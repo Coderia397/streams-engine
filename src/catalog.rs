@@ -38,6 +38,33 @@ pub struct CatalogItem {
     pub keywords: Vec<String>,
     /// Minutes: movie runtime or median episode runtime, 0 when unknown
     pub runtime: u32,
+    /// Bit flags computed once at load (see FLAG_*), so page builders never scan titles or keywords per request
+    pub flags: u8,
+}
+
+pub const FLAG_CHRISTMAS: u8 = 1;
+pub const FLAG_HALLOWEEN: u8 = 2;
+pub const FLAG_WRESTLING_EVENT: u8 = 4;
+pub const FLAG_NONSCRIPTED: u8 = 8; // news, talk, soap
+
+fn compute_flags(title: &str, keywords: &[String], tv_type: Option<&str>) -> u8 {
+    let t = title.to_lowercase();
+    let mut f = 0u8;
+    if keywords.iter().any(|k| k.contains("christmas")) || t.contains("christmas") || t.contains("xmas") || t.contains("santa claus") {
+        f |= FLAG_CHRISTMAS;
+    }
+    if keywords.iter().any(|k| k.contains("halloween")) || t.contains("halloween") {
+        f |= FLAG_HALLOWEEN;
+    }
+    if keywords.iter().any(|k| k == "pro wrestling" || k == "professional wrestling")
+        || ["wwe ", "wwf ", "wcw ", "wrestlemania", "summerslam", "royal rumble", "survivor series"].iter().any(|w| t.contains(w))
+    {
+        f |= FLAG_WRESTLING_EVENT;
+    }
+    if matches!(tv_type, Some("News") | Some("Talk Show") | Some("Soap")) {
+        f |= FLAG_NONSCRIPTED;
+    }
+    f
 }
 
 /// TMDB numbers movies and TV series separately, so the same id exists in both. The engine keys every
@@ -133,11 +160,15 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         let media_type: String = row.get(1).unwrap_or_default();
         let tmdb_id = row.get::<_, i64>(0)? as u32;
 
+        let title: String = row.get(2).unwrap_or_default();
+        let keywords = json_list(row.get::<_, Option<String>>(18).unwrap_or(None), true);
+        let tv_type = row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty());
+        let flags = compute_flags(&title, &keywords, tv_type.as_deref());
         Ok(CatalogItem {
             id:            item_key(&media_type, tmdb_id),
             tmdb_id,
             media_type,
-            title:         row.get(2).unwrap_or_default(),
+            title,
             release_year,
             genres,
             overview:      row.get(5).unwrap_or_default(),
@@ -151,10 +182,11 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             vote_count:    row.get::<_, i64>(13).unwrap_or(0).max(0) as u32,
             adult:         row.get::<_, i64>(14).unwrap_or(0) != 0,
             original_language: row.get::<_, Option<String>>(15).unwrap_or(None).unwrap_or_default(),
-            tv_type:       row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty()),
+            tv_type,
             countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
-            keywords:      json_list(row.get::<_, Option<String>>(18).unwrap_or(None), true),
+            keywords,
             runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
+            flags,
         })
     })?;
 
