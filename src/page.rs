@@ -932,17 +932,16 @@ impl<'a> PageContext<'a> {
                 let majority_tv = row_items.iter().filter(|r| r.media_type == "tv").count() * 2 >= row_items.len();
                 let other = if majority_tv { "movie" } else { "tv" };
                 let in_row: HashSet<u32> = row_items.iter().map(|r| r.id).collect();
-                let cands: Vec<(u32, Vec<f32>)> = items
+                // rank the other type by closeness to the cluster centre without copying vectors, then copy only the best 120
+                let mut scored: Vec<(f32, usize)> = items
                     .iter()
-                    .filter(|(it, _)| it.media_type == other && !in_row.contains(&it.id) && !state.used_ids.contains(&it.id))
-                    .map(|(it, v)| (it.id, v.clone()))
+                    .enumerate()
+                    .filter(|(_, (it, _))| it.media_type == other && !in_row.contains(&it.id) && !state.used_ids.contains(&it.id))
+                    .map(|(i, (_, v))| (cosine_sim(v, &centers[c]), i))
                     .collect();
-                // only the closest 120 to the cluster centre are worth ranking
-                let mut cands = cands;
-                cands.sort_unstable_by(|a, b| {
-                    cosine_sim(&b.1, &centers[c]).partial_cmp(&cosine_sim(&a.1, &centers[c])).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                cands.truncate(120);
+                scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                scored.truncate(120);
+                let cands: Vec<(u32, Vec<f32>)> = scored.into_iter().map(|(_, i)| (items[i].0.id, items[i].1.clone())).collect();
                 self.blend_other_type(&mut row_items, &centers[c], other, cands);
             }
             state.used_ids.extend(row_items.iter().map(|r| r.id));
