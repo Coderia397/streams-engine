@@ -35,3 +35,15 @@ pub fn is_quality_anchor(item: &CatalogItem) -> bool {
 pub fn rerank_score(cosine_sim: f32, popularity: f32) -> f32 {
     cosine_sim - 0.08 * popularity.ln_1p()
 }
+
+/// Quality score of a title for ranking members. Uses the vote count as the confidence behind the rating when it is
+/// known (catalog_v2, pulled titles); falls back to popularity for titles that were never pulled.
+pub fn item_quality(item: &CatalogItem) -> f32 {
+    if item.vote_count > 0 {
+        let vc = item.vote_count as f32;
+        let calibrated = (vc * item.vote_average + C * MU_0) / (vc + C);
+        2.0 * calibrated + 4.5 * (1.0 + item.popularity).ln()
+    } else {
+        bayesian_quality_score(item.vote_average, item.popularity)
+    }
+}

@@ -4,6 +4,7 @@ pub mod centroid;
 pub mod cluster;
 pub mod hnsw;
 pub mod mmr;
+pub mod row_label;
 pub mod mood;
 pub mod page;
 pub mod quality;

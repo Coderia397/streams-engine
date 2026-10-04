@@ -13,10 +13,25 @@ use crate::vectors::{cosine_sim, l2_normalize, sphere_mean, VectorStore, DIMS};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+
+/// Rules that keep defects out of default pages: tile art required, no news, talk or soap in default rows,
+/// no Christmas or Halloween titles outside their window. `ENGINE_SAFETY_NETS=off` disables them for baselines.
+pub static SAFETY_NETS: AtomicBool = AtomicBool::new(true);
+fn safety_nets() -> bool {
+    SAFETY_NETS.load(Ordering::Relaxed)
+}
+
+/// Titles in the Top 10 row
+const TOP_N: usize = 10;
+
+/// Session seeded exploration: how far a session may reorder seeds, and the share of members a session leaves out of
+/// the MMR pool, so two sessions see different rows and titles while one session stays stable.
+const SEED_NOISE: f32 = 0.30;
+const MEMBER_DROP: f32 = 0.22;
 
 /// Coherence gate thresholds. Set by percentile matching (ai-engine/scripts/calibrate.py): each gate keeps the strictness it had
 /// in the first Qwen3-Embedding-4B space, translated to the current space (title free text with tagline, people and cast,
@@ -92,13 +107,17 @@ impl PageState {
     }
 
     /// Claim the first unused title from candidates. Final fallback always wins.
+    /// Titles are compared in the form clients see (at most 4 words), so two long candidates that shorten to the
+    /// same text cannot both be used on one page.
     pub fn claim_title(&mut self, candidates: &[String]) -> String {
-        let chosen = candidates
+        let clamped: Vec<String> = candidates.iter().map(|t| clamp_words(t, 4)).collect();
+        let chosen = clamped
             .iter()
-            .find(|t| !self.used_titles.contains(*t))
+            .find(|t| !t.is_empty() && !self.used_titles.contains(*t))
             .cloned()
             .unwrap_or_else(|| {
-                candidates.last().cloned().unwrap_or_else(|| "More Picks".to_string())
+                let base = clamped.last().cloned().unwrap_or_else(|| "More Picks".to_string());
+                format!("{base} {}", self.used_titles.len() + 1)
             });
         self.used_titles.insert(chosen.clone());
         chosen
@@ -132,6 +151,9 @@ pub struct RowItem {
     pub popularity:   f32,
     pub release_year: Option<i32>,
     pub genres:       Vec<String>,
+    /// TMDB tv type (Scripted, Reality, Talk Show, ...) and original language, for clients and checks
+    pub tv_type:      Option<String>,
+    pub language:     String,
 }
 
 impl RowItem {
@@ -148,6 +170,8 @@ impl RowItem {
             popularity:    item.popularity,
             release_year:  item.release_year,
             genres:        item.genres.clone(),
+            tv_type:       item.tv_type.clone(),
+            language:      item.original_language.clone(),
         }
     }
 }
@@ -181,6 +205,35 @@ impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.genre_spec.map_or(true, |spec| spec.matches(item))
+            && (!safety_nets() || self.allowed_by_nets(item))
+    }
+
+    /// Vote count floor: a rating from a handful of votes says nothing. Known only for pulled titles (all of the
+    /// quality pool); genre pages use a lower floor so small collections survive.
+    fn reliable(&self, item: &CatalogItem) -> bool {
+        meets_vote_floor(item, self.genre_spec.is_some())
+    }
+
+    /// News, talk and soap never fill default rows (a page that asks for them keeps them); seasonal titles only
+    /// appear inside their window (the Halloween page lifts the Halloween rule).
+    fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
+        let nonscripted = matches!(item.tv_type.as_deref(), Some("News") | Some("Talk Show") | Some("Soap"));
+        if nonscripted && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
+            return false;
+        }
+        let (m, d) = self.today;
+        let md = (m as u32) * 100 + d as u32;
+        let t = item.title.to_lowercase();
+        let christmas = item.keywords.iter().any(|k| k.contains("christmas")) || t.contains("christmas") || t.contains("xmas") || t.contains("santa claus");
+        if christmas && !(md >= 1120 || md <= 106) {
+            return false;
+        }
+        let halloween = item.keywords.iter().any(|k| k.contains("halloween")) || t.contains("halloween");
+        let halloween_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Halloween));
+        if halloween && !halloween_page && !(md >= 1001 && md <= 1101) {
+            return false;
+        }
+        true
     }
 
     // ── HNSW / brute-force retrieval ─────────────────────────────────────────
@@ -259,12 +312,14 @@ impl<'a> PageContext<'a> {
             .iter()
             .enumerate()
             .map(|(i, seed)| {
-                let score = if has_taste {
+                let base = if has_taste {
                     cosine_sim(&self.taste, &seed.centroid)
                 } else {
                     1.0
                 };
-                (score, i)
+                // exploration: a session reorders the seeds a little (stable for the session)
+                let noise = if self.session.is_empty() || !safety_nets() { 0.0 } else { SEED_NOISE * entry_noise(self.session, i) };
+                (base + noise, i)
             })
             .collect();
 
@@ -296,7 +351,7 @@ impl<'a> PageContext<'a> {
                 .member_ids
                 .iter()
                 .filter_map(|id| self.catalog.get(id))
-                .filter(|item| self.matches_filters(item) && passes_member_quality(item))
+                .filter(|item| self.matches_filters(item) && passes_member_quality(item) && self.reliable(item))
                 .collect();
 
             if cand_items.is_empty() {
@@ -318,11 +373,21 @@ impl<'a> PageContext<'a> {
 
             // Best quality members only, then fetch their vectors
             cand_items.sort_unstable_by(|a, b| {
-                bayesian_quality_score(b.vote_average, b.popularity)
-                    .partial_cmp(&bayesian_quality_score(a.vote_average, a.popularity))
+                crate::quality::item_quality(b)
+                    .partial_cmp(&crate::quality::item_quality(a))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             cand_items.truncate(MEMBER_POOL);
+            if !self.session.is_empty() && safety_nets() && cand_items.len() > 60 {
+                let kept: Vec<&CatalogItem> = cand_items
+                    .iter()
+                    .copied()
+                    .filter(|it| entry_noise(self.session, it.id as usize) >= MEMBER_DROP)
+                    .collect();
+                if kept.len() >= 45 {
+                    cand_items = kept;
+                }
+            }
             let members: Vec<(&CatalogItem, Vec<f32>)> = cand_items
                 .into_iter()
                 .filter_map(|item| {
@@ -442,11 +507,16 @@ impl<'a> PageContext<'a> {
                 rows[row_idx].items.iter().map(|item| item.genres.as_slice()),
                 &dominant_genre,
             );
-            let candidates = derive_title(
+            let has_taxonomy = taxonomy_title.is_some();
+            let mut derived = derive_title(
                 centroid, &dominant_genre, second.as_deref(), era.as_deref(),
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
                 taxonomy_title, self.mood_vault,
             );
+            let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
+            let mut candidates = if has_taxonomy && !derived.is_empty() { vec![derived.remove(0)] } else { Vec::new() };
+            candidates.extend(crate::row_label::candidates(&row_catalog));
+            candidates.extend(derived);
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 4);
         }
@@ -546,14 +616,14 @@ impl<'a> PageContext<'a> {
                 let good: Vec<(&CatalogItem, f32)> = hits
                     .iter()
                     .filter_map(|(id, sim)| self.catalog.get(id).map(|i| (i, *sim)))
-                    .filter(|(i, _)| self.matches_filters(i) && passes_member_quality(i))
+                    .filter(|(i, _)| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
                     .collect();
                 if good.len() < MIN_ROW {
                     return None;
                 }
                 let strength = 0.2
                     * good.iter().take(10)
-                        .map(|(i, _)| bayesian_quality_score(i.vote_average, i.popularity) / 35.0)
+                        .map(|(i, _)| crate::quality::item_quality(i) / 35.0)
                         .sum::<f32>()
                     / good.len().min(10) as f32;
                 let (ex, xp) = score_of[&idx];
@@ -660,7 +730,7 @@ impl<'a> PageContext<'a> {
             let cand_vecs: Vec<(u32, Vec<f32>)> = hits
                 .iter()
                 .filter_map(|(id, _)| self.catalog.get(id))
-                .filter(|i| self.matches_filters(i) && passes_member_quality(i))
+                .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
                 .take(ROW_SIZE * 3)
                 .filter_map(|i| {
                     let idx = self.vectors.index_of(i.id)?;
@@ -712,11 +782,11 @@ impl<'a> PageContext<'a> {
         let mut pool: Vec<&CatalogItem> = self
             .catalog
             .values()
-            .filter(|i| self.matches_filters(i) && passes_member_quality(i))
+            .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
             .collect();
         pool.sort_unstable_by(|a, b| {
-            bayesian_quality_score(b.vote_average, b.popularity)
-                .partial_cmp(&bayesian_quality_score(a.vote_average, a.popularity))
+            crate::quality::item_quality(b)
+                .partial_cmp(&crate::quality::item_quality(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         pool.truncate(POOL);
@@ -863,12 +933,13 @@ impl<'a> PageContext<'a> {
                 rows[row_idx].items.iter().map(|item| item.genres.as_slice()),
                 &genre,
             );
-            let candidates =
-                derive_title(
-                    &centers[c], &genre, second.as_deref(), era.as_deref(),
-                    rows[row_idx].items.first().map(|i| i.title.as_str()),
-                    None, self.mood_vault,
-                );
+            let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
+            let mut candidates = crate::row_label::candidates(&row_catalog);
+            candidates.extend(derive_title(
+                &centers[c], &genre, second.as_deref(), era.as_deref(),
+                rows[row_idx].items.first().map(|i| i.title.as_str()),
+                None, self.mood_vault,
+            ));
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 4);
         }
@@ -947,7 +1018,7 @@ impl<'a> PageContext<'a> {
             .into_iter()
             .filter_map(|(id, _)| {
                 let item = self.catalog.get(&id)?;
-                if item.media_type != other || exclude.contains(&id) || !self.matches_filters(item) || !passes_member_quality(item) {
+                if item.media_type != other || exclude.contains(&id) || !self.matches_filters(item) || !passes_member_quality(item) || !self.reliable(item) {
                     return None;
                 }
                 let idx = self.vectors.index_of(id)?;
@@ -960,18 +1031,29 @@ impl<'a> PageContext<'a> {
     // ── Row builders ──────────────────────────────────────────────────────────
 
     fn build_trending_row(&self) -> Option<Row> {
+        let nets = safety_nets();
         let mut items: Vec<&CatalogItem> = self
             .catalog
             .values()
             .filter(|item| self.matches_filters(item))
+            .filter(|item| {
+                // a Top 10 needs real titles: art, a decent rating, scripted or documentary TV
+                !nets
+                    || (item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
+                        && item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty())
+                        && item.vote_average >= 6.0
+                        && item.overview_chars() >= 60
+                        && !matches!(item.tv_type.as_deref(), Some("Reality") | Some("Video") | Some("News") | Some("Talk Show") | Some("Soap")))
+            })
             .collect();
-        // Only the top ROW_SIZE are needed: select them in linear time instead of sorting the whole catalog
+        let size = if nets { TOP_N } else { ROW_SIZE };
+        // Only the top `size` are needed: select them in linear time instead of sorting the whole catalog
         let by_pop_desc = |a: &&CatalogItem, b: &&CatalogItem| {
             b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal)
         };
-        if items.len() > ROW_SIZE {
-            items.select_nth_unstable_by(ROW_SIZE - 1, by_pop_desc);
-            items.truncate(ROW_SIZE);
+        if items.len() > size {
+            items.select_nth_unstable_by(size - 1, by_pop_desc);
+            items.truncate(size);
         }
         items.sort_unstable_by(by_pop_desc);
         let row_items: Vec<RowItem> = items
@@ -983,10 +1065,10 @@ impl<'a> PageContext<'a> {
             return None;
         }
 
-        let title = if self.surface == "tv" {
-            "Top 10 Series Today"
-        } else {
-            "Top 10 Today"
+        let title = match (self.surface, nets) {
+            ("tv", _) => "Top 10 Series Today",
+            ("movie", true) => "Top 10 Movies Today",
+            _ => "Top 10 Today",
         };
 
         Some(Row {
@@ -1070,6 +1152,11 @@ fn entry_noise(session: &str, idx: usize) -> f32 {
     ((h.finish() >> 40) as f32) / ((1u64 << 24) as f32)
 }
 
+/// Vote count floor (see `PageContext::reliable`): 10 votes on default pages, 5 on genre pages.
+pub fn meets_vote_floor(item: &CatalogItem, genre_page: bool) -> bool {
+    !safety_nets() || item.vote_count == 0 || item.vote_count >= if genre_page { 5 } else { 10 }
+}
+
 /// Cheap quality gate for cluster members: drops obscure, unrated and stub entries.
 pub fn passes_member_quality(item: &CatalogItem) -> bool {
     // The catalog has no vote_count, so popularity is the proxy for a reliable rating.
@@ -1078,6 +1165,7 @@ pub fn passes_member_quality(item: &CatalogItem) -> bool {
         && item.popularity >= 2.0
         && item.overview_chars() >= 60
         && item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
+        && (!safety_nets() || item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty()))
 }
 
 /// Second most common genre, if any.
@@ -1104,7 +1192,7 @@ fn dominant_era(items: &[RowItem]) -> Option<String> {
         }
     }
     let (decade, n) = counts.into_iter().max_by_key(|(_, c)| *c)?;
-    if total == 0 || n * 2 < total {
+    if total == 0 || n * 10 < total * 7 {
         return None;
     }
     Some(if decade >= 2000 { format!("{decade}s") } else { format!("{}s", decade % 100) })

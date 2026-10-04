@@ -5,6 +5,7 @@ mod centroid;
 mod cluster;
 mod hnsw;
 mod mmr;
+mod row_label;
 mod mood;
 mod page;
 mod quality;
@@ -30,6 +31,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
+    // ENGINE_SAFETY_NETS=off turns off the rules that hide data defects (tile art, news and talk shows, off season titles)
+    // so a baseline can be measured without them.
+    if std::env::var("ENGINE_SAFETY_NETS").map(|v| v.eq_ignore_ascii_case("off")).unwrap_or(false) {
+        page::SAFETY_NETS.store(false, std::sync::atomic::Ordering::Relaxed);
+        info!("safety nets OFF");
+    }
     let port = config.port;
     let state = build_app_state(&config).await?;
 

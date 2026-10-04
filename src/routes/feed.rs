@@ -54,6 +54,7 @@ fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &cra
             (surface == "both" || i.media_type == surface)
                 && spec.matches(i)
                 && crate::page::passes_member_quality(i)
+                && crate::page::meets_vote_floor(i, true)
         })
         .count();
     (pool / (ROW_TITLES * SESSION_TURNOVER)).min(NETFLIX_ROWS_CAP)
@@ -267,6 +268,8 @@ fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>) -> Vec<serde_json
                     "poster_path":   it.poster_path,
                     "backdrop_path": it.backdrop_path,
                     "vote_average":  it.vote_average,
+                    "tv_type":       it.tv_type,
+                    "language":      it.language,
                 })
             })
             .collect();
