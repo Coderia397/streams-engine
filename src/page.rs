@@ -28,6 +28,11 @@ pub fn safety_nets() -> bool {
 /// Titles in the Top 10 row
 const TOP_N: usize = 10;
 
+/// At most this many titles of one franchise (same first significant title word) in a row, so a row is not
+/// 13 Doctor Who entries. And at most this many documentary or reality rows on a default page.
+const FRANCHISE_CAP: usize = 3;
+const NONSCRIPTED_ROW_CAP: u32 = 2;
+
 /// Session seeded exploration: how far a session may reorder seeds, and the share of members a session leaves out of
 /// the MMR pool, so two sessions see different rows and titles while one session stays stable.
 const SEED_NOISE: f32 = 0.30;
@@ -82,6 +87,8 @@ pub struct PageState {
     pub placed_centroids: Vec<Vec<f32>>,
     /// Ids already placed in a row of this page (mixing never reuses a title)
     pub used_ids: HashSet<u32>,
+    /// Documentary and reality rows placed so far
+    pub nonscripted_rows: u32,
 }
 
 impl PageState {
@@ -91,6 +98,7 @@ impl PageState {
             recent_genres:    VecDeque::new(),
             placed_centroids: Vec::new(),
             used_ids:         HashSet::new(),
+            nonscripted_rows: 0,
         }
     }
 
@@ -381,6 +389,13 @@ impl<'a> PageContext<'a> {
             let dominant_genre =
                 majority_genre(cand_items.iter().map(|item| item.genres.as_slice()));
 
+            // Documentary and reality rows are capped on default pages
+            let nonscripted_row = dominant_genre == "Documentary" || dominant_genre == "Reality";
+            if nonscripted_row && self.genre.is_none() && safety_nets() && state.nonscripted_rows >= NONSCRIPTED_ROW_CAP {
+                n_genre += 1;
+                continue;
+            }
+
             // Genre bitmask: no same genre in last GENRE_WINDOW rows.
             // Checked before any vector work so rejected seeds stay cheap.
             // A genre filtered page is one genre by design, so the rule does not apply.
@@ -454,11 +469,7 @@ impl<'a> PageContext<'a> {
             let centroid = sphere_mean(&fil_vecs);
 
             // Build row items (up to ROW_SIZE)
-            let row_items: Vec<RowItem> = fil_ids
-                .iter()
-                .take(ROW_SIZE)
-                .filter_map(|id| self.catalog.get(id).map(RowItem::from_catalog))
-                .collect();
+            let row_items: Vec<RowItem> = self.diverse_titles(&fil_ids, ROW_SIZE);
 
             if row_items.len() < COHERENCE_MIN_ITEMS {
                 continue;
@@ -475,6 +486,9 @@ impl<'a> PageContext<'a> {
                 self.blend_other_type(&mut row_items, &centroid, other, cands);
             }
             state.used_ids.extend(row_items.iter().map(|r| r.id));
+            if nonscripted_row {
+                state.nonscripted_rows += 1;
+            }
 
             // Record state
             n_row += 1;
@@ -922,11 +936,8 @@ impl<'a> PageContext<'a> {
                 .iter()
                 .map(|&(i, _)| (items[i].0.id, items[i].1.clone()))
                 .collect();
-            let picked = greedy_mmr(&centers[c], &candidates, ROW_SIZE, MMR_LAMBDA);
-            let row_items: Vec<RowItem> = picked
-                .iter()
-                .filter_map(|id| self.catalog.get(id).map(RowItem::from_catalog))
-                .collect();
+            let picked = greedy_mmr(&centers[c], &candidates, ROW_SIZE * 2, MMR_LAMBDA);
+            let row_items: Vec<RowItem> = self.diverse_titles(&picked, ROW_SIZE);
             if row_items.len() < COHERENCE_MIN_ITEMS {
                 continue;
             }
@@ -978,6 +989,26 @@ impl<'a> PageContext<'a> {
         }
 
         rows
+    }
+
+    /// Build row items from ranked ids with at most FRANCHISE_CAP titles per franchise.
+    fn diverse_titles(&self, ids: &[u32], n: usize) -> Vec<RowItem> {
+        let cap = if safety_nets() { FRANCHISE_CAP } else { usize::MAX };
+        let mut per: HashMap<String, usize> = HashMap::new();
+        let mut out: Vec<RowItem> = Vec::with_capacity(n);
+        for id in ids {
+            let Some(item) = self.catalog.get(id) else { continue };
+            let key = franchise_key(&item.title);
+            let count = per.entry(key.clone()).or_insert(0);
+            if key.is_empty() || *count < cap {
+                *count += 1;
+                out.push(RowItem::from_catalog(item));
+                if out.len() >= n {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     // ── Mixing movies and series ──────────────────────────────────────────────
@@ -1177,6 +1208,16 @@ fn kind_weight(kind: &str) -> f32 {
 }
 
 /// Stable value in (0, 1) per (session, entry): exploration without flicker.
+/// First significant word of a title: titles sharing it count as one franchise (Doctor Who, Star Wars, Tarzan).
+fn franchise_key(title: &str) -> String {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for" | "you" | "with" | "from" | "that" | "this" | "les" | "der" | "die" | "das" | "los" | "las"))
+        .unwrap_or("")
+        .to_string()
+}
+
 fn entry_noise(session: &str, idx: usize) -> f32 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
