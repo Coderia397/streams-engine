@@ -47,12 +47,12 @@ const SESSION_TURNOVER: usize = 2;
 const MIN_GENRE_PAGE_ROWS: usize = 8;
 
 /// Rows a genre page can support for this surface, from the size of its quality pool.
-fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, genre: &str) -> usize {
+fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &crate::genre_spec::GenreSpec) -> usize {
     let pool = catalog
         .values()
         .filter(|i| {
             (surface == "both" || i.media_type == surface)
-                && i.genres.iter().any(|g| g.eq_ignore_ascii_case(genre))
+                && spec.matches(i)
                 && crate::page::passes_member_quality(i)
         })
         .count();
@@ -167,8 +167,9 @@ pub async fn feed(
     }
 
     let catalog = state.catalog.load();
-    let cap = match genre {
-        Some(g) => genre_row_cap(&catalog, surface, g),
+    let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
+    let cap = match &genre_spec {
+        Some(spec) => genre_row_cap(&catalog, surface, spec),
         None => NETFLIX_ROWS_CAP,
     };
     let target_rows = (offset + per_page).min(cap.max(MIN_ROWS_FLOOR)).max(MIN_ROWS_FLOOR);
@@ -196,6 +197,7 @@ pub async fn feed(
         mood_vault: &state.mood_vault,
         surface,
         genre,
+        genre_spec: genre_spec.as_ref(),
         taste:      taste_vec,
         target_rows,
         mean:       &state.mean,

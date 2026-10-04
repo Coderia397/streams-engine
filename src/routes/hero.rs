@@ -78,6 +78,10 @@ pub async fn hero_feed(
 ) -> impl IntoResponse {
     let surface = q.surface.to_lowercase();
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty()).map(str::to_lowercase);
+    // The client sends a genre id or name; both resolve through genre_spec for this surface
+    let hero_surface = match surface_media_type(&surface) { Some(m) => m, None => "both" };
+    let genre_spec = genre.as_deref().map(|g| crate::genre_spec::resolve(g, hero_surface));
+    let nonscripted_ok = genre_spec.as_ref().map_or(false, |s| s.includes_nonscripted());
     let session = q.session_id.clone().unwrap_or_default();
     let limit = q.limit.clamp(1, 20);
 
@@ -103,12 +107,10 @@ pub async fn hero_feed(
                 && i.poster_path.as_deref().is_some_and(|p| !p.is_empty())
                 && i.vote_average >= MIN_VOTE_AVERAGE
                 && i.popularity >= MIN_POPULARITY
-                && !i.genres.iter().any(|g| EXCLUDED_GENRES.iter().any(|x| g.eq_ignore_ascii_case(x)))
+                && (nonscripted_ok || !i.genres.iter().any(|g| EXCLUDED_GENRES.iter().any(|x| g.eq_ignore_ascii_case(x))))
                 && i.overview_chars() >= MIN_OVERVIEW_CHARS
                 && media_type.map_or(true, |m| i.media_type == m)
-                && genre.as_deref().map_or(true, |g| {
-                    i.genres.iter().any(|ig| ig.to_lowercase() == g)
-                })
+                && genre_spec.as_ref().map_or(true, |spec| spec.matches(i))
         })
         .collect();
 

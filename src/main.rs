@@ -1,5 +1,6 @@
 mod app;
 mod catalog;
+mod genre_spec;
 mod centroid;
 mod cluster;
 mod hnsw;

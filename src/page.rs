@@ -158,8 +158,10 @@ pub struct PageContext<'a> {
     pub taxonomy:    &'a TaxonomyStore,
     pub mood_vault:  &'a MoodVault,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
-    /// Optional genre name filter (case-insensitive) applied to every row.
+    /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
+    /// The rule that genre resolves to, applied to every row (see genre_spec.rs).
+    pub genre_spec:  Option<&'a crate::genre_spec::GenreSpec>,
     pub taste:       Vec<f32>,  // blended query vector on unit sphere
     pub target_rows: usize,
     /// Corpus mean vector for centred scoring
@@ -173,7 +175,7 @@ pub struct PageContext<'a> {
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
-            && self.genre.map_or(true, |g| item.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)))
+            && self.genre_spec.map_or(true, |spec| spec.matches(item))
     }
 
     // ── HNSW / brute-force retrieval ─────────────────────────────────────────

@@ -32,6 +32,12 @@ pub struct CatalogItem {
     pub original_language: String,
     /// TMDB tv type: Scripted, Reality, Talk Show, News, Documentary, Miniseries, Video
     pub tv_type: Option<String>,
+    /// ISO 3166 origin or production countries (catalog_v2 only)
+    pub countries: Vec<String>,
+    /// TMDB keywords, lower case (catalog_v2 only, pulled titles)
+    pub keywords: Vec<String>,
+    /// Minutes: movie runtime or median episode runtime, 0 when unknown
+    pub runtime: u32,
 }
 
 /// TMDB numbers movies and TV series separately, so the same id exists in both. The engine keys every
@@ -67,6 +73,13 @@ impl CatalogItem {
 pub type CatalogMap = HashMap<u32, CatalogItem>;
 pub type SharedCatalog = Arc<ArcSwap<CatalogMap>>;
 
+/// Parse a JSON array of strings (catalog_v2 stores lists that way). Empty on null or bad input.
+fn json_list(raw: Option<String>, lower: bool) -> Vec<String> {
+    raw.and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok())
+        .map(|v| if lower { v.into_iter().map(|s| s.to_lowercase()).collect() } else { v })
+        .unwrap_or_default()
+}
+
 /// Load the entire catalog from SQLite into a HashMap keyed by `item_key` (type aware).
 /// This is the ONLY place SQLite is accessed — never on the request hot path.
 pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
@@ -85,12 +98,15 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         "SELECT {id_col}, media_type, title, release_year, genres,
                 overview, poster_path, backdrop_path,
                 vote_average, popularity, is_anime, tagline, director,
-                {vc}, {ad}, {ol}, {tt}
+                {vc}, {ad}, {ol}, {tt}, {oc}, {kw}, {rt}
          FROM catalog",
         vc = opt("vote_count", "0"),
         ad = opt("adult", "0"),
         ol = opt("original_language", "''"),
         tt = opt("tv_type", "NULL"),
+        oc = opt("origin_country", "NULL"),
+        kw = opt("keywords", "NULL"),
+        rt = opt("runtime", "0"),
     );
     let mut stmt = conn.prepare(&sql)?;
 
@@ -136,6 +152,9 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             adult:         row.get::<_, i64>(14).unwrap_or(0) != 0,
             original_language: row.get::<_, Option<String>>(15).unwrap_or(None).unwrap_or_default(),
             tv_type:       row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty()),
+            countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
+            keywords:      json_list(row.get::<_, Option<String>>(18).unwrap_or(None), true),
+            runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
         })
     })?;
 
