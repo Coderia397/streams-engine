@@ -28,9 +28,9 @@ pub fn safety_nets() -> bool {
 /// Titles in the Top 10 row
 const TOP_N: usize = 10;
 
-/// At most this many titles of one franchise (same first significant title word) in a row, so a row is not
-/// 13 Doctor Who entries. And at most this many documentary or reality rows on a default page.
-const FRANCHISE_CAP: usize = 3;
+/// At most this many titles in a row may share a significant title word (a franchise, a character name), so a row is
+/// not 13 Doctor Who entries. And at most this many documentary or reality rows on a default page.
+const FRANCHISE_CAP: usize = 2;
 const NONSCRIPTED_ROW_CAP: u32 = 2;
 
 /// Session seeded exploration: how far a session may reorder seeds, and the share of members a session leaves out of
@@ -991,21 +991,23 @@ impl<'a> PageContext<'a> {
         rows
     }
 
-    /// Build row items from ranked ids with at most FRANCHISE_CAP titles per franchise.
+    /// Build row items from ranked ids; no significant title word is shared by more than FRANCHISE_CAP titles.
     fn diverse_titles(&self, ids: &[u32], n: usize) -> Vec<RowItem> {
         let cap = if safety_nets() { FRANCHISE_CAP } else { usize::MAX };
         let mut per: HashMap<String, usize> = HashMap::new();
         let mut out: Vec<RowItem> = Vec::with_capacity(n);
         for id in ids {
             let Some(item) = self.catalog.get(id) else { continue };
-            let key = franchise_key(&item.title);
-            let count = per.entry(key.clone()).or_insert(0);
-            if key.is_empty() || *count < cap {
-                *count += 1;
-                out.push(RowItem::from_catalog(item));
-                if out.len() >= n {
-                    break;
-                }
+            let words = title_words(&item.title);
+            if words.iter().any(|w| per.get(w).copied().unwrap_or(0) >= cap) {
+                continue;
+            }
+            for w in words {
+                *per.entry(w).or_insert(0) += 1;
+            }
+            out.push(RowItem::from_catalog(item));
+            if out.len() >= n {
+                break;
             }
         }
         out
@@ -1208,14 +1210,21 @@ fn kind_weight(kind: &str) -> f32 {
 }
 
 /// Stable value in (0, 1) per (session, entry): exploration without flicker.
-/// First significant word of a title: titles sharing it count as one franchise (Doctor Who, Star Wars, Tarzan).
-fn franchise_key(title: &str) -> String {
-    title
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .find(|w| w.len() >= 3 && !matches!(*w, "the" | "and" | "for" | "you" | "with" | "from" | "that" | "this" | "les" | "der" | "die" | "das" | "los" | "las"))
-        .unwrap_or("")
-        .to_string()
+/// Significant words of a title (3 or more letters, not a number, not a filler word), lower case, without repeats.
+fn title_words(title: &str) -> Vec<String> {
+    const FILLER: &[&str] = &[
+        "the", "and", "for", "you", "your", "with", "from", "that", "this", "are", "was", "not", "but", "his", "her", "its", "our",
+        "their", "who", "why", "how", "what", "when", "where", "into", "over", "under", "off", "out", "one", "two", "new", "old",
+        "man", "men", "day", "night", "life", "love", "last", "first", "les", "der", "die", "das", "los", "las", "part", "chapter",
+        "season", "episode", "movie", "film", "story", "special",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for w in title.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if w.chars().count() >= 3 && !w.chars().all(|c| c.is_ascii_digit()) && !FILLER.contains(&w) && !out.iter().any(|o| o == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
 }
 
 fn entry_noise(session: &str, idx: usize) -> f32 {
