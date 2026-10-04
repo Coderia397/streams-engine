@@ -65,6 +65,8 @@ pub struct PageState {
     pub recent_genres: VecDeque<String>,
     /// Centroids of placed thematic rows, in placement order
     pub placed_centroids: Vec<Vec<f32>>,
+    /// Ids already placed in a row of this page (mixing never reuses a title)
+    pub used_ids: HashSet<u32>,
 }
 
 impl PageState {
@@ -73,6 +75,7 @@ impl PageState {
             used_titles:      HashSet::new(),
             recent_genres:    VecDeque::new(),
             placed_centroids: Vec::new(),
+            used_ids:         HashSet::new(),
         }
     }
 
@@ -377,6 +380,18 @@ impl<'a> PageContext<'a> {
             if row_items.len() < COHERENCE_MIN_ITEMS {
                 continue;
             }
+
+            // Mix movies and series where the theme has both (surfaces that show both types)
+            let mut row_items = row_items;
+            if self.surface == "both" {
+                let majority_tv = row_items.iter().filter(|r| r.media_type == "tv").count() * 2 >= row_items.len();
+                let other = if majority_tv { "movie" } else { "tv" };
+                let mut exclude = state.used_ids.clone();
+                exclude.extend(row_items.iter().map(|r| r.id));
+                let cands = self.other_type_neighbours(&centroid, other, &exclude).await;
+                self.blend_other_type(&mut row_items, &centroid, other, cands);
+            }
+            state.used_ids.extend(row_items.iter().map(|r| r.id));
 
             // Record state
             n_row += 1;
@@ -813,6 +828,25 @@ impl<'a> PageContext<'a> {
             if row_items.len() < COHERENCE_MIN_ITEMS {
                 continue;
             }
+            let mut row_items = row_items;
+            if self.surface == "both" {
+                let majority_tv = row_items.iter().filter(|r| r.media_type == "tv").count() * 2 >= row_items.len();
+                let other = if majority_tv { "movie" } else { "tv" };
+                let in_row: HashSet<u32> = row_items.iter().map(|r| r.id).collect();
+                let cands: Vec<(u32, Vec<f32>)> = items
+                    .iter()
+                    .filter(|(it, _)| it.media_type == other && !in_row.contains(&it.id) && !state.used_ids.contains(&it.id))
+                    .map(|(it, v)| (it.id, v.clone()))
+                    .collect();
+                // only the closest 120 to the cluster centre are worth ranking
+                let mut cands = cands;
+                cands.sort_unstable_by(|a, b| {
+                    cosine_sim(&b.1, &centers[c]).partial_cmp(&cosine_sim(&a.1, &centers[c])).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                cands.truncate(120);
+                self.blend_other_type(&mut row_items, &centers[c], other, cands);
+            }
+            state.used_ids.extend(row_items.iter().map(|r| r.id));
             state.record_thematic(self.genre.unwrap_or("").to_string(), centers[c].clone());
             rows.push(Row { title: "__PENDING__".to_string(), archetype: "thematic".to_string(), kind: String::new(), items: row_items });
             placed.push(c);
@@ -840,6 +874,87 @@ impl<'a> PageContext<'a> {
         }
 
         rows
+    }
+
+    // ── Mixing movies and series ──────────────────────────────────────────────
+
+    /// Rows on a surface that shows both types (home) should mix movies and series when the theme has both.
+    /// Clusters tend to be one type, so a row that is mostly one type gets about 40 percent of its nearest
+    /// neighbours of the other type, picked by relevance to the row centroid (with a floor relative to the
+    /// row's own items) and diversified with MMR. A row with fewer than MIN_BLEND on theme items of the other
+    /// type stays as it is: not every row has to mix.
+    fn blend_other_type(&self, row: &mut Vec<RowItem>, centroid: &[f32], other: &str, cands: Vec<(u32, Vec<f32>)>) {
+        const TARGET_SHARE: f32 = 0.4;
+        const MIN_BLEND: usize = 3;
+        const FLOOR_DROP: f32 = 0.12;
+        if row.is_empty() || cands.is_empty() {
+            return;
+        }
+        let have_other = row.iter().filter(|r| r.media_type == other).count();
+        let target = ((ROW_SIZE as f32) * TARGET_SHARE).round() as usize;
+        if have_other >= target {
+            return;
+        }
+        // relevance of the items the row already has of its own type
+        let mut own: Vec<(usize, f32)> = row
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.media_type != other)
+            .filter_map(|(i, r)| {
+                let idx = self.vectors.index_of(r.id)?;
+                Some((i, cosine_sim(centroid, &self.vectors.get_f32(idx))))
+            })
+            .collect();
+        if own.is_empty() {
+            return;
+        }
+        let mut vals: Vec<f32> = own.iter().map(|x| x.1).collect();
+        vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let floor = vals[vals.len() / 2] - FLOOR_DROP;
+        let ok: Vec<(u32, Vec<f32>)> = cands.into_iter().filter(|(_, v)| cosine_sim(centroid, v) >= floor).collect();
+        if ok.is_empty() {
+            return;
+        }
+        let picks = greedy_mmr(centroid, &ok, target - have_other, MMR_LAMBDA);
+        if have_other + picks.len() < MIN_BLEND {
+            return;
+        }
+
+        // compose: own items by relevance, then the other type, spread evenly through the row
+        own.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let other_existing: Vec<RowItem> = row.iter().filter(|r| r.media_type == other).cloned().collect();
+        let other_new: Vec<RowItem> = picks.iter().filter_map(|id| self.catalog.get(id).map(RowItem::from_catalog)).collect();
+        let n_other = other_existing.len() + other_new.len();
+        let new_len = ROW_SIZE.min(row.len() + other_new.len());
+        let keep_own = new_len.saturating_sub(n_other).min(own.len());
+        let own_items: Vec<RowItem> = own.iter().take(keep_own).map(|&(i, _)| row[i].clone()).collect();
+        let other_items: Vec<RowItem> = other_existing.into_iter().chain(other_new).collect();
+        let mut keyed: Vec<(f32, RowItem)> = Vec::with_capacity(own_items.len() + other_items.len());
+        for (rank, it) in own_items.iter().enumerate() {
+            keyed.push(((rank as f32 + 0.5) / own_items.len() as f32, it.clone()));
+        }
+        for (rank, it) in other_items.iter().enumerate() {
+            keyed.push(((rank as f32 + 0.25) / other_items.len() as f32, it.clone()));
+        }
+        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        *row = keyed.into_iter().map(|(_, it)| it).collect();
+    }
+
+    /// Other type neighbours of a centroid from the HNSW index, for the seed path.
+    async fn other_type_neighbours(&self, centroid: &[f32], other: &str, exclude: &HashSet<u32>) -> Vec<(u32, Vec<f32>)> {
+        let found = self.retrieve_candidates(centroid, ANN_ENTRY_K).await;
+        found
+            .into_iter()
+            .filter_map(|(id, _)| {
+                let item = self.catalog.get(&id)?;
+                if item.media_type != other || exclude.contains(&id) || !self.matches_filters(item) || !passes_member_quality(item) {
+                    return None;
+                }
+                let idx = self.vectors.index_of(id)?;
+                Some((id, self.vectors.get_f32(idx)))
+            })
+            .take(120)
+            .collect()
     }
 
     // ── Row builders ──────────────────────────────────────────────────────────
