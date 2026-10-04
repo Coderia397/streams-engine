@@ -76,6 +76,10 @@ const THEMES: &[(&str, &str, bool)] = &[
     ("vampire", "Vampire", false),
     ("witch", "Witchcraft", false),
     ("ghost", "Ghost", false),
+    ("paranormal", "Paranormal", false),
+    ("ghost hunter", "Ghost Hunting", false),
+    ("haunted house", "Haunted House", false),
+    ("haunting", "Haunting", false),
     ("demon", "Demon", false),
     ("supernatural", "Supernatural", false),
     ("monster", "Monster", false),
@@ -138,7 +142,8 @@ fn genre_key(g: &str) -> &str {
     match g {
         "Action & Adventure" => "Action",
         "Sci-Fi & Fantasy" => "Science Fiction",
-        "War & Politics" => "War",
+        // TMDB's TV genre is mostly political drama (Bodyguard, The Politician's Husband), not war
+        "War & Politics" => "Politics",
         "Kids" => "Family",
         other => other,
     }
@@ -163,6 +168,7 @@ fn noun(g: &str) -> Option<&'static str> {
         "Science Fiction" => "Sci-Fi",
         "Thriller" => "Thrillers",
         "War" => "War Stories",
+        "Politics" => "Political Dramas",
         "Western" => "Westerns",
         _ => return None,
     })
@@ -308,6 +314,13 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
         push(format!("{c} {g}"));
         if let Some(g2) = second_genre.and_then(noun) { push(format!("{c} {g} & {g2}")); }
     }
+    // old films: "Classic Comedies" when at least 70 percent are from before 1980
+    let old_share = share(items.iter().filter(|i| i.release_year.map_or(false, |y| y < 1980)).count());
+    if let Some(g) = gnoun {
+        if old_share >= 0.7 && items.iter().all(|i| i.media_type == "movie") {
+            push(format!("Classic {g}"));
+        }
+    }
     if let (Some(d), Some(g)) = (decade.as_ref(), gnoun) {
         push(format!("{d} {g}"));
     }
@@ -318,7 +331,8 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
         }
     }
     if let (Some(g), Some(g2)) = (top_genre, second_genre) {
-        if g != g2 { push(format!("{g} & {g2}")); }
+        let short = |x: &str| if x == "Science Fiction" { "Sci-Fi".to_string() } else { x.to_string() };
+        if g != g2 { push(format!("{} & {}", short(g), short(g2))); }
     }
     out
 }
