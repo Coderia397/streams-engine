@@ -18,16 +18,18 @@ use tokio::sync::RwLock;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Coherence gate thresholds (2560d Qwen3-Embedding space)
-/// Measured on the real catalog: unrelated cluster centres have median cosine 0.64,
-/// and the mean pairwise cosine inside a cluster is about 0.56, so gates sit near those.
-const COHERENCE_STRONG: f32 = 0.66;
-const COHERENCE_OK:     f32 = 0.55;
-const COHERENCE_WEAK:   f32 = 0.50;
+/// Coherence gate thresholds. Set by percentile matching (ai-engine/scripts/calibrate.py): each gate keeps the strictness it had
+/// in the first Qwen3-Embedding-4B space, translated to the current space (title free text with tagline, people and cast,
+/// seeds trained on the quality pool). Rerun the script after any embedding change; thresholds from another space do not transfer.
+/// Measured 2026-10-04: old to new COHERENCE_OK 0.55 to 0.60 (item to medoid cosine), COHERENCE_WEAK 0.50 to 0.56 (mean pairwise
+/// cosine of a row), MMD_MAX_INTER_SIM 0.76 to 0.74 and BYW_MAX_CENTROID_SIM 0.68 to 0.63 (centroid to centroid).
+const COHERENCE_STRONG: f32 = 0.74;
+const COHERENCE_OK:     f32 = 0.60;
+const COHERENCE_WEAK:   f32 = 0.56;
 const COHERENCE_MIN_ITEMS: usize = 6;
 
 /// Max cosine similarity between any two row anchors (MMD gate)
-const MMD_MAX_INTER_SIM: f32 = 0.76;
+const MMD_MAX_INTER_SIM: f32 = 0.74;
 
 /// MMR λ: 0 = pure diversity, 1 = pure relevance. 0.72 = production default.
 const MMR_LAMBDA: f32 = 0.72;
@@ -54,7 +56,7 @@ const ANN_ENTRY_K: usize = 500;
 const TAXONOMY_THRESHOLD: f32 = 0.55;
 
 /// BYW anchor: cosine to any existing row centroid must be below this
-const BYW_MAX_CENTROID_SIM: f32 = 0.68;
+const BYW_MAX_CENTROID_SIM: f32 = 0.63;
 
 // ── PageState ─────────────────────────────────────────────────────────────────
 
