@@ -157,6 +157,7 @@ fn noun(g: &str) -> Option<&'static str> {
         "Animation" => "Animation",
         "Comedy" => "Comedies",
         "Crime" => "Crime Stories",
+        "Documentary" => "Documentaries",
         "Drama" => "Dramas",
         "Family" => "Family Favorites",
         "Fantasy" => "Fantasy",
@@ -279,6 +280,8 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: String| { if !out.contains(&s) { out.push(s); } };
     let gnoun = top_genre.and_then(noun);
+    // "Space Historical Dramas" reads badly: a theme before History uses plain Dramas
+    let theme_noun = if top_genre == Some("History") { Some("Dramas") } else { gnoun };
 
     if anime {
         // a standalone anime theme first (Mecha Anime), then the genre
@@ -300,11 +303,12 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
         }
         push(match top_genre { Some("Comedy") => "Funny Reality Shows".to_string(), _ => "Reality Shows".to_string() });
     }
-    if let (Some(c), Some(t)) = (country_adj, themes.iter().find(|t| !t.1)) {
-        if let Some(g) = gnoun { push(format!("{c} {} {g}", t.0)); }
+    let is_city = |p: &str| matches!(p, "Paris" | "London" | "Tokyo" | "New York" | "Los Angeles");
+    if let (Some(c), Some(t)) = (country_adj, themes.iter().find(|t| !t.1 && !is_city(t.0))) {
+        if let Some(g) = theme_noun { push(format!("{c} {} {g}", t.0)); }
     }
     for t in themes.iter().filter(|t| !t.1) {
-        if let Some(g) = gnoun { push(format!("{} {}", t.0, g)); }
+        if let Some(g) = theme_noun { push(format!("{} {}", t.0, g)); }
     }
     for t in themes.iter().filter(|t| t.1) {
         push(match country_adj { Some(c) if !t.0.starts_with(c) => format!("{c} {}", t.0), _ => t.0.to_string() });
@@ -334,6 +338,8 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
         let short = |x: &str| if x == "Science Fiction" { "Sci-Fi".to_string() } else { x.to_string() };
         if g != g2 { push(format!("{} & {}", short(g), short(g2))); }
     }
+    // clients show at most 4 words: a longer candidate would be cut mid phrase
+    out.retain(|t| t.split_whitespace().count() <= 4);
     out
 }
 

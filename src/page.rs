@@ -110,16 +110,26 @@ impl PageState {
     /// Titles are compared in the form clients see (at most 4 words), so two long candidates that shorten to the
     /// same text cannot both be used on one page.
     pub fn claim_title(&mut self, candidates: &[String]) -> String {
+        // "Horror & Mystery" and "Mystery & Horror" are the same title
+        let canon = |t: &str| -> String {
+            match t.split_once(" & ") {
+                Some((a, b)) if !b.contains(" & ") => {
+                    let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+                    if a <= b { format!("{a} & {b}") } else { format!("{b} & {a}") }
+                }
+                _ => t.to_lowercase(),
+            }
+        };
         let clamped: Vec<String> = candidates.iter().map(|t| clamp_words(t, 4)).collect();
         let chosen = clamped
             .iter()
-            .find(|t| !t.is_empty() && !self.used_titles.contains(*t))
+            .find(|t| !t.is_empty() && !self.used_titles.contains(&canon(t)))
             .cloned()
             .unwrap_or_else(|| {
                 let base = clamped.last().cloned().unwrap_or_else(|| "More Picks".to_string());
                 format!("{base} {}", self.used_titles.len() + 1)
             });
-        self.used_titles.insert(chosen.clone());
+        self.used_titles.insert(canon(&chosen));
         chosen
     }
 }
@@ -219,6 +229,12 @@ impl<'a> PageContext<'a> {
     fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
         let nonscripted = matches!(item.tv_type.as_deref(), Some("News") | Some("Talk Show") | Some("Soap"));
         if nonscripted && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
+            return false;
+        }
+        // pay per view wrestling events are not default home content (the Sports page keeps them)
+        let wrestling_event = item.keywords.iter().any(|k| k == "pro wrestling" || k == "professional wrestling")
+            || ["wwe ", "wwf ", "wcw ", "wrestlemania", "summerslam", "royal rumble", "survivor series"].iter().any(|w| item.title.to_lowercase().contains(w));
+        if wrestling_event && !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Sports)) {
             return false;
         }
         let (m, d) = self.today;
@@ -861,10 +877,24 @@ impl<'a> PageContext<'a> {
 
         // Order clusters: taste alignment when there is a taste vector, else size
         let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
+        let anime_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime));
+        let mut anime_count = vec![0usize; k];
+        for (i, &(c, _)) in assign.iter().enumerate() {
+            if items[i].0.is_anime {
+                anime_count[c] += 1;
+            }
+        }
         let mut order: Vec<(usize, f32)> = (0..k)
             .map(|c| {
                 let size = assign.iter().filter(|(a, _)| *a == c).count();
-                let key = if has_taste { cosine_sim(&self.taste, &centers[c]) } else { size as f32 };
+                let key = if has_taste {
+                    cosine_sim(&self.taste, &centers[c])
+                } else {
+                    // largest clusters first, with a session jitter, and an anime cluster does not lead a page that is not about anime
+                    let jitter = if self.session.is_empty() || !safety_nets() { 1.0 } else { 0.7 + 0.6 * entry_noise(self.session, c) };
+                    let anime_penalty = if !anime_page && size > 0 && anime_count[c] * 10 > size * 6 { 0.5 } else { 1.0 };
+                    size as f32 * jitter * anime_penalty
+                };
                 (c, key)
             })
             .collect();
@@ -929,14 +959,16 @@ impl<'a> PageContext<'a> {
                 break;
             }
             let era = dominant_era(&rows[row_idx].items);
+            // name the row after what is in it, not after the page genre
+            let dom = majority_genre(rows[row_idx].items.iter().map(|item| item.genres.as_slice()));
             let second = second_genre(
                 rows[row_idx].items.iter().map(|item| item.genres.as_slice()),
-                &genre,
+                &dom,
             );
             let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
             let mut candidates = crate::row_label::candidates(&row_catalog);
             candidates.extend(derive_title(
-                &centers[c], &genre, second.as_deref(), era.as_deref(),
+                &centers[c], &dom, second.as_deref(), era.as_deref(),
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
                 None, self.mood_vault,
             ));
