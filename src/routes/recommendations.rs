@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use crate::app::AppState;
 use crate::hnsw::ENGINE_READY;
+use crate::identity::{maturity_of, MaybeCaller, Maturity};
 use crate::vectors::l2_normalize;
 
 #[derive(Deserialize)]
@@ -38,8 +39,10 @@ fn centred(state: &AppState, idx: usize) -> Vec<f32> {
 /// (older shape, same items).
 pub async fn recommendations(
     State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
     Query(params): Query<RecsQuery>,
 ) -> impl IntoResponse {
+    let maturity = maturity_of(&caller);
     let catalog = state.catalog.load();
 
     let Some(anchor_key) = crate::catalog::resolve_key(&catalog, params.id, params.media_type.as_deref()) else {
@@ -53,17 +56,19 @@ pub async fn recommendations(
 
     let anchor_vec = state.vectors.get_f32(anchor_idx);
     let limit = params.limit.clamp(1, 100);
+    // a restricted profile loses many neighbours to the filter, so look further
+    let fetch = if maturity.is_some_and(|m| m != Maturity::Adult) { limit * 4 + 1 } else { limit + 1 };
 
     // HNSW when the index is ready, brute force otherwise
     let mut similar: Vec<(u32, f32)> = Vec::new();
     if ENGINE_READY.load(Ordering::Relaxed) {
         let guard = state.hnsw.read().await;
         if let Some(idx) = guard.as_ref() {
-            if let Ok(r) = idx.search(&anchor_vec, limit + 1) { similar = r; }
+            if let Ok(r) = idx.search(&anchor_vec, fetch) { similar = r; }
         }
     }
     if similar.is_empty() {
-        similar = state.vectors.brute_force_topk(&anchor_vec, limit + 1);
+        similar = state.vectors.brute_force_topk(&anchor_vec, fetch);
     }
 
     let anchor_c = centred(&state, anchor_idx);
@@ -72,9 +77,11 @@ pub async fn recommendations(
     let results: Vec<_> = similar
         .iter()
         .filter(|(id, _)| *id != anchor_key) // exclude the anchor itself
-        .take(limit)
         .filter_map(|(id, sim)| {
             let item = catalog.get(id)?;
+            if !maturity.map_or(true, |m| m.allows(item)) {
+                return None;
+            }
             let c = state.vectors.index_of(*id).map(|i| dot(&anchor_c, &centred(&state, i))).unwrap_or(0.0);
             let shared: Vec<&String> = item.genres.iter().filter(|g| anchor_genres.contains(g)).take(2).collect();
             let pills: Vec<&String> = if shared.is_empty() { item.genres.iter().take(2).collect() } else { shared };
@@ -96,6 +103,7 @@ pub async fn recommendations(
                 "vibe_pills":        pills,
             }))
         })
+        .take(limit)
         .collect();
 
     Json(json!({

@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use crate::app::AppState;
 use crate::catalog::CatalogItem;
+use crate::identity::{maturity_of, MaybeCaller};
 
 /// Candidates kept per surface/genre before the session-seeded draw.
 const POOL_SIZE: usize = 50;
@@ -74,20 +75,23 @@ fn hero_item_json(item: &CatalogItem) -> Value {
 /// different rotation.
 pub async fn hero_feed(
     State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
     Query(q): Query<HeroQuery>,
 ) -> impl IntoResponse {
+    let maturity = maturity_of(&caller);
     let surface = q.surface.to_lowercase();
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty()).map(str::to_lowercase);
     // The client sends a genre id or name; both resolve through genre_spec for this surface
     let hero_surface = match surface_media_type(&surface) { Some(m) => m, None => "both" };
     let genre_spec = genre.as_deref().map(|g| crate::genre_spec::resolve(g, hero_surface));
     let nonscripted_ok = genre_spec.as_ref().map_or(false, |s| s.includes_nonscripted());
-    let session = q.session_id.clone().unwrap_or_default();
+    // A verified caller's session is its profile (or user) id, whatever the query says
+    let session = caller.as_ref().map(|c| c.session_key()).or_else(|| q.session_id.clone()).unwrap_or_default();
     let limit = q.limit.clamp(1, 20);
 
     let session_state = if session.is_empty() { None } else { state.sessions.get(&session) };
     let version = session_state.as_ref().map_or(0, |s| s.lock().unwrap().version);
-    let cache_key = format!("hero:{surface}:{}:{session}:{limit}:v{version}", genre.as_deref().unwrap_or(""));
+    let cache_key = format!("hero:{surface}:{}:{session}:{limit}:v{version}:m{}", genre.as_deref().unwrap_or(""), maturity.map_or("-", |m| m.as_str()));
     if let Some(hit) = state.feed_cache.get(&cache_key).await {
         if let Ok(v) = serde_json::from_str::<Value>(&hit) {
             return Json(v);
@@ -112,6 +116,7 @@ pub async fn hero_feed(
                 && media_type.map_or(true, |m| i.media_type == m)
                 && (!crate::page::safety_nets() || i.flags & crate::catalog::FLAG_SUGGESTIVE == 0)
                 && genre_spec.as_ref().map_or(true, |spec| spec.matches(i))
+                && maturity.map_or(true, |m| m.allows(i))
         })
         .collect();
 

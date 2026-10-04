@@ -25,6 +25,8 @@ pub struct AppState {
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
     pub sessions:   crate::sessions::SessionStore,
+    /// Supabase token verification; none when SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY is missing (every request anonymous)
+    pub identity:   Option<Arc<crate::identity::Identity>>,
     /// Kept for FTS search route
     pub config:     Arc<Config>,
 }
@@ -119,6 +121,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         feed_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),
+        identity: crate::identity::Identity::from_env(),
         config,
     });
     if !state.taxonomy.entries.is_empty() {

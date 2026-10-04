@@ -217,12 +217,15 @@ pub struct PageContext<'a> {
     pub today:       (u8, u8),
     /// Session id: seeds the exploration noise so a session sees a stable page
     pub session:     &'a str,
+    /// Maturity of the verified caller's profile; none for anonymous requests (see identity.rs)
+    pub maturity:    Option<crate::identity::Maturity>,
 }
 
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.genre_spec.map_or(true, |spec| spec.matches(item))
+            && self.maturity.map_or(true, |m| m.allows(item))
             && (!safety_nets() || self.allowed_by_nets(item))
     }
 

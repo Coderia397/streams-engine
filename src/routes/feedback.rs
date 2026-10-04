@@ -4,6 +4,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::app::AppState;
+use crate::identity::MaybeCaller;
 use crate::sessions::FeedbackEvent;
 
 #[derive(Deserialize)]
@@ -20,9 +21,12 @@ pub struct FeedbackBody {
 /// /api/hero-feed calls with the same session_id reflect it.
 pub async fn feedback(
     State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
     Json(body): Json<FeedbackBody>,
 ) -> impl IntoResponse {
-    if body.session_id.trim().is_empty() {
+    // A verified caller always writes to its own profile (or user) session, never to the id in the body
+    let session_id = caller.as_ref().map(|c| c.session_key()).unwrap_or_else(|| body.session_id.clone());
+    if session_id.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "session_id required"})));
     }
     let catalog = state.catalog.load();
@@ -30,7 +34,7 @@ pub async fn feedback(
         return (StatusCode::NOT_FOUND, Json(json!({"error": "item not found", "id": body.item_id})));
     };
 
-    let session = state.sessions.get_or_create(&body.session_id);
+    let session = state.sessions.get_or_create(&session_id);
     let mut s = session.lock().unwrap();
     s.record(item, body.event);
     (StatusCode::OK, Json(json!({ "ok": true, "taste": s.taste(), "version": s.version })))

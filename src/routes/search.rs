@@ -8,6 +8,7 @@ use serde_json::json;
 use std::sync::Arc;
 use rusqlite::Connection;
 use crate::app::AppState;
+use crate::identity::{maturity_of, MaybeCaller, Maturity};
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -22,10 +23,14 @@ fn default_limit() -> usize { 20 }
 /// Falls back to in-memory scan if the DB is unreachable.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
     Query(params): Query<SearchQuery>,
 ) -> impl IntoResponse {
+    let maturity = maturity_of(&caller);
     let q = params.q.trim().to_string();
-    let limit = params.limit.clamp(1, 100);
+    let wanted = params.limit.clamp(1, 100);
+    // a restricted profile loses some matches to the filter, so fetch more and trim after
+    let limit = if maturity.is_some_and(|m| m != Maturity::Adult) { (wanted * 4).min(200) } else { wanted };
 
     if q.is_empty() {
         return Json(json!({"results": [], "query": q}));
@@ -56,6 +61,24 @@ pub async fn search(
                 "genres": item.genres, "release_year": item.release_year,
             })).collect()
         }
+    };
+
+    let results: Vec<serde_json::Value> = match maturity {
+        Some(m) if m != Maturity::Adult => {
+            let catalog = state.catalog.load();
+            results
+                .into_iter()
+                .filter(|r| {
+                    let id = r.get("id").and_then(|v| v.as_u64()).map(|v| v as u32);
+                    let mt = r.get("media_type").and_then(|v| v.as_str());
+                    id.and_then(|id| crate::catalog::resolve_key(&catalog, id, mt))
+                        .and_then(|k| catalog.get(&k))
+                        .map_or(false, |item| m.allows(item))
+                })
+                .take(wanted)
+                .collect()
+        }
+        _ => results,
     };
 
     Json(json!({"results": results, "query": q}))

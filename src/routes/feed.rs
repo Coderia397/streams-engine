@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::identity::{maturity_of, MaybeCaller};
 use crate::page::{PageContext, Row};
 use axum::{
     extract::{Query, State},
@@ -148,8 +149,12 @@ fn parse_taste(taste_str: &str) -> Vec<(String, f32)> {
 /// Main discovery feed endpoint. Returns a page of thematic recommendation rows.
 pub async fn feed(
     State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
     Query(params): Query<FeedQuery>,
 ) -> impl IntoResponse {
+    // A verified caller's session is its profile (or user) id, whatever the query says
+    let session_id: Option<String> = caller.as_ref().map(|c| c.session_key()).or_else(|| params.session_id.clone());
+    let maturity = maturity_of(&caller);
     let surface = normalize_surface(params.surface.as_deref().unwrap_or("both"));
     let taste_str = params.taste.as_deref().or(params.affinity.as_deref()).unwrap_or("");
     let genre = params.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());
@@ -159,8 +164,7 @@ pub async fn feed(
 
     // Session memory: fall back to the session's learned taste when the client
     // sends none, and drop titles the session has already started.
-    let session_state = params
-        .session_id
+    let session_state = session_id
         .as_deref()
         .filter(|s| !s.is_empty())
         .and_then(|sid| state.sessions.get(sid));
@@ -174,10 +178,12 @@ pub async fn feed(
 
     let mut key = cache_key(surface, &genre.unwrap_or("").to_lowercase(), offset + per_page, taste_str);
     // Entry driven pages explore per session, so the session is part of the key
-    key = format!("{key}|s:{}", params.session_id.as_deref().unwrap_or(""));
+    key = format!("{key}|s:{}", session_id.as_deref().unwrap_or(""));
     if session_version > 0 {
-        key = format!("{key}|{}|v{session_version}", params.session_id.as_deref().unwrap_or(""));
+        key = format!("{key}|{}|v{session_version}", session_id.as_deref().unwrap_or(""));
     }
+    // pages differ per maturity
+    key = format!("{key}|m:{}", maturity.map_or("-", |m| m.as_str()));
 
     // Check cache first
     if let Some(cached) = state.feed_cache.get(&key).await {
@@ -220,7 +226,8 @@ pub async fn feed(
         target_rows,
         mean:       &state.mean,
         today:      crate::taxonomy::today_md(),
-        session:    params.session_id.as_deref().unwrap_or(""),
+        session:    session_id.as_deref().unwrap_or(""),
+        maturity,
     };
 
     let all_rows = to_client_rows(ctx.build_page().await, &session_seen);

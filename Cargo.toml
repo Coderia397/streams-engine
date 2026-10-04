@@ -58,6 +58,9 @@ tracing          = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow           = "1"
 
+# Identity (Supabase access token verification, ES256)
+jsonwebtoken     = "9"
+
 # Data-prep tool deps (used by src/bin/* only, zero overhead in the engine hot path)
 reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 clap             = { version = "4", features = ["derive"] }
