@@ -308,7 +308,14 @@ impl<'a> PageContext<'a> {
 
     // ── Main page assembly ────────────────────────────────────────────────────
 
+    /// The page for this request: rows from the builder for the page kind, then the Top 10 rows are placed by value among
+    /// them (see `place_charts`).
     pub async fn build_page(&self) -> Vec<Row> {
+        let rows = self.build_page_rows().await;
+        self.place_charts(rows)
+    }
+
+    async fn build_page_rows(&self) -> Vec<Row> {
         if self.genre.is_some() {
             return self.build_genre_page();
         }
@@ -1097,14 +1104,101 @@ impl<'a> PageContext<'a> {
             .collect()
     }
 
+    // ── Placing the Top 10 rows ───────────────────────────────────────────────
+
+    /// Puts the Top 10 rows among the rows of the page by value, the way rows are chosen for a page: every row has a value,
+    /// the page is filled greedily from the highest, and a row loses value for being like a row already placed (two charts
+    /// are alike, so the second waits). Nothing says "second" or "third": a profile with a clear taste values a chart less
+    /// than rows made for it, so the chart sinks; a new profile values a chart more, so it rises. A session's noise moves a
+    /// chart a little so pages differ between sessions.
+    fn place_charts(&self, rows: Vec<Row>) -> Vec<Row> {
+        /// Value of a chart for a profile without taste, and how much taste takes away.
+        const CHART_BASE: f32 = 0.80;
+        const CHART_TASTE_PENALTY: f32 = 0.30;
+        const CHART_NOISE: f32 = 0.35;
+        /// How much resemblance to a row already placed costs.
+        const SIMILAR_COST: f32 = 0.35;
+
+        let mut charts = self.build_chart_rows();
+        let (old_charts, mut body): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.archetype == "trending");
+        if charts.is_empty() {
+            charts = old_charts;
+        }
+        if charts.is_empty() {
+            return body;
+        }
+        // a title that is in a Top 10 is not repeated in the rows around it (the Top 10 must keep its ten)
+        let chart_ids: HashSet<u32> = charts.iter().flat_map(|c| c.items.iter().map(|i| i.id)).collect();
+        for row in body.iter_mut() {
+            if row.items.iter().any(|i| chart_ids.contains(&i.id)) {
+                row.items.retain(|i| !chart_ids.contains(&i.id));
+            }
+        }
+        body.retain(|r| r.items.len() >= COHERENCE_MIN_ITEMS);
+
+        let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
+        let n = body.len().max(2) as f32 - 1.0;
+        let value = |archetype: &str, index: usize, k: usize| -> f32 {
+            match archetype {
+                "continue" => 1.5,
+                "top_picks" => 1.1,
+                "byw" => 0.95,
+                "trending" => {
+                    let base = if has_taste { CHART_BASE - CHART_TASTE_PENALTY } else { CHART_BASE };
+                    base + CHART_NOISE * (entry_noise(self.session, 10_000 + k) - 0.5)
+                }
+                // rows of a page arrive best first; value falls with that order
+                _ => 1.0 - 0.9 * (index as f32 / n),
+            }
+        };
+        struct Entry { archetype: String, value: f32, row: Row }
+        let mut pending: Vec<Entry> = body
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| Entry { value: value(&r.archetype, i, 0), archetype: r.archetype.clone(), row: r })
+            .chain(charts.into_iter().enumerate().map(|(k, r)| Entry { value: value("trending", 0, k), archetype: "trending".to_string(), row: r }))
+            .collect();
+        let mut placed: Vec<Row> = Vec::with_capacity(pending.len());
+        let mut placed_kinds: Vec<String> = Vec::new();
+        while !pending.is_empty() {
+            let best = pending
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let alike = placed_kinds.iter().filter(|k| **k == e.archetype && e.archetype != "thematic").count() as f32;
+                    (i, e.value - SIMILAR_COST * alike)
+                })
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0)))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let e = pending.remove(best);
+            placed_kinds.push(e.archetype);
+            placed.push(e.row);
+        }
+        placed
+    }
+
     // ── Row builders ──────────────────────────────────────────────────────────
 
     fn build_trending_row(&self) -> Option<Row> {
+        self.build_chart_row(None)
+    }
+
+    /// The Top 10 rows of this page: Movies and Series separately on the home page, one row on the other pages.
+    fn build_chart_rows(&self) -> Vec<Row> {
+        if self.genre.is_none() && self.surface == "both" && safety_nets() {
+            ["movie", "tv"].into_iter().filter_map(|t| self.build_chart_row(Some(t))).collect()
+        } else {
+            self.build_chart_row(None).into_iter().collect()
+        }
+    }
+
+    fn build_chart_row(&self, only: Option<&str>) -> Option<Row> {
         let nets = safety_nets();
         let mut items: Vec<&CatalogItem> = self
             .catalog
             .values()
-            .filter(|item| self.matches_filters(item))
+            .filter(|item| self.matches_filters(item) && only.map_or(true, |t| item.media_type == t))
             .filter(|item| {
                 // a Top 10 needs real titles: art, a decent rating, scripted or documentary TV
                 !nets
@@ -1134,9 +1228,9 @@ impl<'a> PageContext<'a> {
             return None;
         }
 
-        let title = match (self.surface, nets) {
-            ("tv", _) => "Top 10 Series Today",
-            ("movie", true) => "Top 10 Movies Today",
+        let title = match (only, self.surface, nets) {
+            (Some("tv"), _, _) | (None, "tv", _) => "Top 10 Series Today",
+            (Some("movie"), _, _) | (None, "movie", true) => "Top 10 Movies Today",
             _ => "Top 10 Today",
         };
 

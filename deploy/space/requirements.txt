@@ -1,0 +1,4 @@
+gradio
+spaces
+huggingface_hub
+httpx

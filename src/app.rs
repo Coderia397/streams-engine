@@ -74,7 +74,9 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
     let stamp = vectors_stamp(&config.vectors_path);
     let stamp_file = format!("{}.stamp", config.index_path);
-    let stamp_ok = std::fs::read_to_string(&stamp_file).map(|s| s.trim() == stamp).unwrap_or(false);
+    // HNSW_TRUST_INDEX=1: a downloaded copy has new file times, so the stamp (size and time of the vectors file) cannot match; the index is trusted as it is
+    let trust = std::env::var("HNSW_TRUST_INDEX").map(|v| v == "1").unwrap_or(false);
+    let stamp_ok = trust || std::fs::read_to_string(&stamp_file).map(|s| s.trim() == stamp).unwrap_or(false);
     if std::path::Path::new(&config.index_path).exists() && !stamp_ok {
         tracing::warn!("HNSW index has no matching stamp for {} — it was built from other vectors, rebuilding", config.vectors_path);
     }
