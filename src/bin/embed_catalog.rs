@@ -2,8 +2,8 @@
 ///
 /// Usage:
 ///   embed-catalog --server http://localhost:8086 \
-///                 --db /pstream-catalog/catalog.db \
-///                 --out /pstream-catalog/vectors.bin \
+///                 --db /streams-catalog/catalog.db \
+///                 --out /streams-catalog/vectors.bin \
 ///                 [--batch 32] [--resume]
 ///
 /// On first run:   writes vectors.bin from scratch (sorted by popularity DESC).

@@ -2,8 +2,8 @@
 ///
 /// Usage:
 ///   embed-taxonomy --server http://localhost:8086 \
-///                  --db /pstream-catalog/vibe_universe.db \
-///                  --out-dir /pstream-catalog
+///                  --db /streams-catalog/vibe_universe.db \
+///                  --out-dir /streams-catalog
 ///
 /// Reads:   vibe_universe.db → mood_anchors table (title, curated_keywords)
 /// Writes:  taxonomy_embeddings.bin  (u32 count + n × 2560 f32)

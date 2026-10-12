@@ -265,7 +265,7 @@ mod layout_tests {
 
     #[test]
     fn detects_f16_f32_and_rejects_bad_sizes() {
-        let dir = std::env::temp_dir().join(format!("pstream_layout_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("streams_layout_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("v.bin").to_string_lossy().to_string();
 

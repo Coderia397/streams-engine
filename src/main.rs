@@ -25,7 +25,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Tracing: RUST_LOG=pstream_engine=info,tower_http=debug
+    // Tracing: RUST_LOG=streams_engine=info,tower_http=debug
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(EnvFilter::from_env("RUST_LOG"))
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
-    info!("pstream-engine listening on {addr}");
+    info!("streams-engine listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 

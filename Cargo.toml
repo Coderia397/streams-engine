@@ -1,5 +1,5 @@
 [package]
-name    = "pstream-engine"
+name    = "streams-engine"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +7,7 @@ edition = "2021"
 # Replaces the Python search_server.py. Serves /api/feed and related routes on :8088.
 
 [[bin]]
-name = "pstream-engine"
+name = "streams-engine"
 path = "src/main.rs"
 
 [[bin]]
@@ -23,7 +23,7 @@ name = "embed-catalog"
 path = "src/bin/embed_catalog.rs"
 
 [lib]
-name = "pstream_engine"
+name = "streams_engine"
 path = "src/lib.rs"
 
 [dependencies]

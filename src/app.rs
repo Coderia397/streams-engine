@@ -170,7 +170,7 @@ impl Config {
         fn env(key: &str, default: &str) -> String {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
         }
-        let base = env("CATALOG_DIR", "/Users/ibrahim/pstream-catalog");
+        let base = env("CATALOG_DIR", "/Users/ibrahim/streams-catalog");
         // The rebuilt catalog and vectors are picked up automatically when present.
         let pick = |v2: &str, v1: &str| {
             if std::path::Path::new(&format!("{base}/{v2}")).exists() { format!("{base}/{v2}") } else { format!("{base}/{v1}") }

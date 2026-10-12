@@ -284,7 +284,7 @@ mod tests {
     use super::*;
 
     fn temp_db(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("pstream_cat_{}_{}", name, std::process::id()));
+        let dir = std::env::temp_dir().join(format!("streams_cat_{}_{}", name, std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("c.db").to_string_lossy().to_string()
     }

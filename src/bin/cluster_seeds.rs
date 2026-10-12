@@ -1,14 +1,14 @@
 /// Rust binary: offline spherical k-means → <vectors file>.seeds (member ids are type aware keys)
 ///
 /// Usage:
-///   cluster-seeds --vecs /pstream-catalog/vectors.bin \
-///                 --db   /pstream-catalog/catalog.db  \
-///                 --k 500 --iters 80 --out-dir /pstream-catalog
+///   cluster-seeds --vecs /streams-catalog/vectors.bin \
+///                 --db   /streams-catalog/catalog.db  \
+///                 --k 500 --iters 80 --out-dir /streams-catalog
 
 use anyhow::{bail, Result};
 use clap::Parser;
 use memmap2::MmapOptions;
-use pstream_engine::vectors::resolve_ids;
+use streams_engine::vectors::resolve_ids;
 use rayon::prelude::*;
 use std::fs;
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Mapping vectors from {} ...", args.vecs.display());
     let file = fs::File::open(&args.vecs)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
-    let (n, half) = pstream_engine::vectors::detect_layout(&args.vecs.to_string_lossy(), mmap.len())?;
+    let (n, half) = streams_engine::vectors::detect_layout(&args.vecs.to_string_lossy(), mmap.len())?;
     // f16 files are widened to f32 in memory; f32 files are used straight from the mapping
     // (mmap is page aligned, so the f32 view is valid).
     let widened: Vec<f32>;
@@ -74,10 +74,10 @@ fn main() -> Result<()> {
 
     // Rows with a near zero norm are failed-embedding placeholders: skip them.
     let in_pool: Option<std::collections::HashSet<u32>> = if args.pool {
-        let catalog = pstream_engine::catalog::load_catalog(&args.db.to_string_lossy())?;
+        let catalog = streams_engine::catalog::load_catalog(&args.db.to_string_lossy())?;
         let set: std::collections::HashSet<u32> = catalog
             .values()
-            .filter(|it| pstream_engine::page::passes_member_quality(it))
+            .filter(|it| streams_engine::page::passes_member_quality(it))
             .map(|it| it.id)
             .collect();
         println!("  quality pool: {} titles", set.len());
