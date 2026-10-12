@@ -193,6 +193,27 @@ fn decade_label(decade: i32) -> String {
     if decade >= 2000 { format!("{decade}s") } else { format!("{}s", decade % 100) }
 }
 
+/// Languages that fit a country. A country that is not listed accepts any language.
+fn fits_language(country: &str, language: &str) -> bool {
+    let langs: &[&str] = match country {
+        "JP" => &["ja"], "KR" => &["ko"], "CN" => &["zh", "cn"], "HK" => &["zh", "cn"], "TW" => &["zh", "cn"], "TH" => &["th"],
+        "IN" => &["hi", "ta", "te", "ml", "kn", "bn", "mr", "pa", "en"], "ID" => &["id"], "PH" => &["tl", "en"], "VN" => &["vi"], "TR" => &["tr"],
+        "FR" => &["fr"], "DE" => &["de"], "IT" => &["it"], "ES" => &["es", "ca", "gl", "eu"], "PT" => &["pt"], "NL" => &["nl"], "BE" => &["nl", "fr"],
+        "SE" => &["sv"], "DK" => &["da"], "NO" => &["no", "nb", "nn"], "FI" => &["fi"], "PL" => &["pl"], "RU" => &["ru"], "UA" => &["uk", "ru"],
+        "GR" => &["el"], "CZ" => &["cs"], "HU" => &["hu"], "RO" => &["ro"], "MX" => &["es"], "BR" => &["pt"], "AR" => &["es"], "CO" => &["es"], "CL" => &["es"],
+        "IL" => &["he"], "IR" => &["fa"], "EG" => &["ar"],
+        "GB" | "IE" | "CA" | "AU" | "NZ" | "ZA" => &["en"],
+        _ => return true,
+    };
+    language.is_empty() || langs.contains(&language)
+}
+
+/// The one country that names a title: the first listed country, if the title's original language fits it.
+pub fn primary_country(it: &CatalogItem) -> Option<&str> {
+    let first = it.countries.first()?;
+    fits_language(first, &it.original_language).then(|| first.as_str())
+}
+
 /// Title candidates for a row, most specific first. Empty when nothing specific can be said.
 pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let n = items.len();
@@ -229,11 +250,13 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let anime = share(items.iter().filter(|i| i.is_anime).count()) >= 0.6;
 
     // country (origin, else language), skipping the US default
+    // The country a viewer would name is the first listed one, and only when the original language fits it (a Spanish
+    // language film with a French co-producer is not a French film; one country counted per title).
     let mut ccount: HashMap<&str, usize> = HashMap::new();
     for it in items {
-        for c in &it.countries {
+        if let Some(c) = primary_country(it) {
             if c != "US" {
-                *ccount.entry(c.as_str()).or_insert(0) += 1;
+                *ccount.entry(c).or_insert(0) += 1;
             }
         }
     }
@@ -352,7 +375,7 @@ mod tests {
             id: 1, tmdb_id: 1, media_type: "tv".into(), title: "t".into(), release_year: Some(year),
             genres: genres.iter().map(|s| s.to_string()).collect(), overview: String::new(), tagline: None, director: None,
             poster_path: None, backdrop_path: None, vote_average: 7.0, popularity: 10.0, is_anime: false, vote_count: 0,
-            adult: false, original_language: "en".into(), tv_type: None,
+            adult: false, original_language: match countries.first() { Some(&"JP") => "ja", Some(&"FR") => "fr", Some(&"ES") => "es", Some(&"KR") => "ko", _ => "en" }.into(), tv_type: None,
             countries: countries.iter().map(|s| s.to_string()).collect(),
             keywords: keywords.iter().map(|s| s.to_string()).collect(), runtime: 0, flags: 0,
         }
@@ -365,6 +388,19 @@ mod tests {
         let c = candidates(&refs);
         assert_eq!(c[0], "Japanese Detective Mysteries");
         assert!(c.contains(&"Detective Mysteries".to_string()));
+    }
+
+    #[test]
+    fn a_country_needs_the_first_listed_country_and_a_fitting_language() {
+        // Spanish language films with a French co production are not French films
+        let mut items: Vec<CatalogItem> = (0..10).map(|i| item(&["Drama"], &["ES", "FR"], &[], 2010 + i)).collect();
+        let refs: Vec<&CatalogItem> = items.iter().collect();
+        assert!(candidates(&refs).iter().all(|c| !c.contains("French")), "{:?}", candidates(&refs));
+        assert!(candidates(&refs).iter().any(|c| c.starts_with("Spanish")));
+        // first country France but the film is in English: no country in the name
+        for it in items.iter_mut() { it.countries = vec!["FR".into(), "US".into()]; it.original_language = "en".into(); }
+        let refs: Vec<&CatalogItem> = items.iter().collect();
+        assert!(candidates(&refs).iter().all(|c| !c.contains("French")));
     }
 
     #[test]

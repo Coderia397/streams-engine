@@ -225,8 +225,19 @@ impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.genre_spec.map_or(true, |spec| spec.matches(item))
+            && self.audience_fits(item)
             && self.maturity.map_or(true, |m| m.allows(item))
             && (!safety_nets() || self.allowed_by_nets(item))
+    }
+
+    /// A page of an adult genre (Action, Thriller, Pride...) does not carry children's titles for an adult or an anonymous
+    /// caller. Kids profiles are limited by their maturity instead, and pages about kids, family, animation or anime keep them.
+    fn audience_fits(&self, item: &CatalogItem) -> bool {
+        let Some(spec) = self.genre_spec else { return true };
+        if spec.keeps_children() || self.maturity.map_or(false, |m| !matches!(m, crate::identity::Maturity::Adult)) {
+            return true;
+        }
+        !item.genres.iter().any(|g| g.eq_ignore_ascii_case("Kids") || g.eq_ignore_ascii_case("Family"))
     }
 
     /// Vote count floor: a rating from a handful of votes says nothing. Known only for pulled titles (all of the
@@ -826,10 +837,12 @@ impl<'a> PageContext<'a> {
             .values()
             .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
             .collect();
+        // ties are broken by id so a page does not depend on the hash map order of the catalog (which changes at every reload)
         pool.sort_unstable_by(|a, b| {
             crate::quality::item_quality(b)
                 .partial_cmp(&crate::quality::item_quality(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         pool.truncate(POOL);
 
@@ -1212,7 +1225,7 @@ impl<'a> PageContext<'a> {
         let size = if nets { TOP_N } else { ROW_SIZE };
         // Only the top `size` are needed: select them in linear time instead of sorting the whole catalog
         let by_pop_desc = |a: &&CatalogItem, b: &&CatalogItem| {
-            b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal)
+            b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id))
         };
         if items.len() > size {
             items.select_nth_unstable_by(size - 1, by_pop_desc);

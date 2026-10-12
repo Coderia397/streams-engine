@@ -65,6 +65,17 @@ fn from_country(it: &CatalogItem, codes: &[&str]) -> bool {
 }
 
 impl GenreSpec {
+    /// Whether children's titles (TMDB Kids or Family) belong on a page of this genre. Only pages about animation, anime,
+    /// kids, family or teens keep them; a page for any other genre (Action, Thriller, Pride) is for adults and teens.
+    pub fn keeps_children(&self) -> bool {
+        match self {
+            GenreSpec::Any | GenreSpec::Anime | GenreSpec::Teen | GenreSpec::Unsupported => true,
+            GenreSpec::Tmdb(names) => names.iter().any(|n| matches!(n.to_ascii_lowercase().as_str(), "kids" | "family" | "animation")),
+            GenreSpec::Name(n) => matches!(n.to_ascii_lowercase().as_str(), "kids" | "family" | "animation" | "kids & family"),
+            _ => false,
+        }
+    }
+
     pub fn matches(&self, it: &CatalogItem) -> bool {
         use GenreSpec::*;
         match self {
