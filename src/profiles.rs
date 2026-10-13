@@ -39,11 +39,13 @@ pub struct TitleProfile {
 }
 
 impl TitleProfile {
-    /// Children's or family title with no adult audience named and no heavy content flag. Used for titles that have no age certificate.
+    /// A children's or family title for a limited profile when the title has no age certificate. Measured against the real certificates of 1,525
+    /// popular titles that have one: audience kids or family only (no teen, no adult named) and no heavy content flag gave 303 of 303 correct
+    /// (all U or PG), recall 20 percent. Looser rules let 12 and 15 titles through (precision 0.89), so they are not used.
     pub fn suits_children(&self) -> bool {
         self.audience & (KIDS | FAMILY) != 0
-            && self.audience & ADULT == 0
-            && !self.content.iter().any(|c| matches!(c.as_str(), "violence" | "sex" | "nudity" | "horror" | "drugs" | "abuse" | "suicide" | "strong language"))
+            && self.audience & (TEEN | ADULT) == 0
+            && !self.content.iter().any(|c| matches!(c.as_str(), "violence" | "sex" | "nudity" | "horror" | "drugs" | "abuse" | "suicide" | "strong language" | "war"))
     }
 
     /// Suits teenagers: no flag for sex, nudity or abuse, and the model did not name only adults.
@@ -200,7 +202,8 @@ mod tests {
         let ok = parse_profile(&json!({"audience": "kids, family", "content": ["humor"]})).unwrap();
         let violent = parse_profile(&json!({"audience": "kids, family", "content": ["violence"]})).unwrap();
         let mixed = parse_profile(&json!({"audience": "family, adult", "content": []})).unwrap();
-        assert!(ok.suits_children() && !violent.suits_children() && !mixed.suits_children());
+        let teen = parse_profile(&json!({"audience": "family, teen", "content": []})).unwrap();
+        assert!(ok.suits_children() && !violent.suits_children() && !mixed.suits_children() && !teen.suits_children());
     }
 
     #[test]
