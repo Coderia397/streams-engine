@@ -195,6 +195,7 @@ pub async fn feed(
     }
 
     let catalog = state.catalog.load();
+    let fresh = state.fresh.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
     let cap = match &genre_spec {
         Some(spec) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
@@ -224,6 +225,8 @@ pub async fn feed(
         taxonomy:   &state.taxonomy,
         mood_vault: &state.mood_vault,
         profiles:   &state.profiles,
+        fresh:      &fresh,
+        today_ymd:  crate::fresh::ymd(crate::fresh::today_days()),
         surface,
         genre,
         genre_spec: genre_spec.as_ref(),

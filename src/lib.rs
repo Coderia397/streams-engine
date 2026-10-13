@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod fresh;
 pub mod genre_spec;
 pub mod identity;
 pub mod centroid;

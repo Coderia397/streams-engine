@@ -46,6 +46,7 @@ LISTS = [
 
 items = {}
 for tag, kind, path, params, pages in LISTS:
+    position = 0
     for page in range(1, pages + 1):
         data = get(path, page=page, **params)
         for r in data.get("results", []):
@@ -59,10 +60,12 @@ for tag, kind, path, params, pages in LISTS:
                 "overview": r.get("overview") or "", "poster_path": r.get("poster_path"), "backdrop_path": r.get("backdrop_path"),
                 "genres": [genres[g] for g in r.get("genre_ids", []) if g in genres], "vote_average": r.get("vote_average") or 0,
                 "vote_count": r.get("vote_count") or 0, "popularity": r.get("popularity") or 0, "release_date": date or "",
-                "origin_country": r.get("origin_country") or [], "adult": bool(r.get("adult")), "lists": [],
+                "origin_country": r.get("origin_country") or [], "adult": bool(r.get("adult")), "lists": [], "ranks": {},
             })
             if tag not in e["lists"]:
                 e["lists"].append(tag)
+                e["ranks"][tag] = position  # place in that list, 0 first
+            position += 1
         if page >= data.get("total_pages", 1):
             break
 

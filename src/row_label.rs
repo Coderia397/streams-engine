@@ -149,6 +149,23 @@ fn genre_key(g: &str) -> &str {
     }
 }
 
+/// The title ready noun of a genre as TMDB names it ("Science Fiction" gives "Sci-Fi"). None for genres that do not make a row name.
+pub fn genre_noun(g: &str) -> Option<&'static str> {
+    noun(genre_key(g))
+}
+
+/// English name of an original language code, for row names such as "New in Korean".
+pub fn language_label(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "en" => "English", "es" => "Spanish", "fr" => "French", "de" => "German", "it" => "Italian", "pt" => "Portuguese", "ru" => "Russian",
+        "ja" => "Japanese", "ko" => "Korean", "zh" | "cn" => "Chinese", "ar" => "Arabic", "hi" => "Hindi", "tr" => "Turkish", "nl" => "Dutch",
+        "pl" => "Polish", "sv" => "Swedish", "da" => "Danish", "no" | "nb" => "Norwegian", "th" => "Thai", "id" => "Indonesian", "ta" => "Tamil",
+        "te" => "Telugu", "fi" => "Finnish", "he" => "Hebrew", "el" => "Greek", "cs" => "Czech", "hu" => "Hungarian", "uk" => "Ukrainian",
+        "fa" => "Persian", "vi" => "Vietnamese", "ro" => "Romanian", "ml" => "Malayalam", "bn" => "Bengali", "tl" => "Filipino",
+        _ => return None,
+    })
+}
+
 /// Plural, title ready noun for a genre. None for genres that do not combine with a theme.
 fn noun(g: &str) -> Option<&'static str> {
     Some(match g {

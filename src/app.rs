@@ -23,6 +23,8 @@ pub struct AppState {
     pub mood_vault: Arc<MoodVault>,
     /// Model written title profiles and their vectors (empty when the files are missing)
     pub profiles:   Arc<crate::profiles::ProfileStore>,
+    /// New, upcoming and trending titles with real release dates (fresh.json, re-read when it changes)
+    pub fresh:      crate::fresh::SharedFresh,
     pub feed_cache: Cache<String, String>,
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
@@ -116,6 +118,11 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let profiles = Arc::new(crate::profiles::ProfileStore::load(&profile_dir));
     info!("Title profiles: {} ({} with vectors)", profiles.profiles.len(), profiles.vectors.len() / crate::profiles::DIMS);
 
+    let fresh_store = crate::fresh::FreshStore::load(&profile_dir);
+    info!("Fresh titles: {} ({})", fresh_store.items.len(), fresh_store.generated);
+    let fresh: crate::fresh::SharedFresh = Arc::new(arc_swap::ArcSwap::from_pointee(fresh_store));
+    crate::fresh::spawn_refresh(fresh.clone(), profile_dir.clone());
+
     let config = Arc::new(config.clone());
     let taxonomy_bin = config.taxonomy_bin_path.clone();
     let state = Arc::new(AppState {
@@ -127,6 +134,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         taxonomy,
         mood_vault,
         profiles,
+        fresh,
         feed_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),

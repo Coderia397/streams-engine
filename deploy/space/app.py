@@ -32,6 +32,18 @@ def download():
     snapshot_download(repo_id=os.environ["DATA_REPO"], repo_type="dataset", local_dir=DATA, token=os.environ.get("HF_TOKEN"))
 
 
+def refresh_fresh():
+    """fresh.json (new, upcoming and trending titles) is rebuilt every six hours in the dataset; fetch it again every two hours, the
+    engine re-reads the file when it changes."""
+    from huggingface_hub import hf_hub_download
+    while True:
+        time.sleep(7200)
+        try:
+            hf_hub_download(repo_id=os.environ["DATA_REPO"], repo_type="dataset", filename="fresh.json", local_dir=DATA, token=os.environ.get("HF_TOKEN"), force_download=True)
+        except Exception as e:
+            print("fresh.json refresh failed:", e, flush=True)
+
+
 def run_engine():
     binary = HERE / "streams-engine"
     binary.chmod(0o755)
@@ -47,6 +59,7 @@ def run_engine():
 def boot():
     try:
         download()
+        threading.Thread(target=refresh_fresh, daemon=True).start()
         run_engine()
     except Exception as e:  # shown by /gradio_api/engine-status; the log keeps the trace
         state["stage"] = f"failed: {e}"

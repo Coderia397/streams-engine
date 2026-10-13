@@ -212,6 +212,9 @@ pub struct PageContext<'a> {
     pub taxonomy:    &'a TaxonomyStore,
     pub mood_vault:  &'a MoodVault,
     pub profiles:    &'a crate::profiles::ProfileStore,
+    /// Release dates of new and upcoming titles, and today's date (YYYY-MM-DD) to compare them with
+    pub fresh:       &'a crate::fresh::FreshStore,
+    pub today_ymd:   String,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
     /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
@@ -1328,15 +1331,9 @@ impl<'a> PageContext<'a> {
             .catalog
             .values()
             .filter(|item| self.matches_filters(item) && only.map_or(true, |t| item.media_type == t))
-            .filter(|item| {
-                // a Top 10 needs real titles: art, a decent rating, scripted or documentary TV
-                !nets
-                    || (item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
-                        && item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty())
-                        && item.vote_average >= 6.0
-                        && item.overview_chars() >= 60
-                        && !matches!(item.tv_type.as_deref(), Some("Reality") | Some("Video") | Some("News") | Some("Talk Show") | Some("Soap")))
-            })
+            .filter(|item| !nets || chart_ok(item))
+            // a title that has not come out yet is not in a Top 10 of what people watch
+            .filter(|item| !self.fresh.is_upcoming(&item.media_type, item.tmdb_id, &self.today_ymd))
             .collect();
         let size = if nets { TOP_N } else { ROW_SIZE };
         // Only the top `size` are needed: select them in linear time instead of sorting the whole catalog
@@ -1462,6 +1459,15 @@ fn entry_noise(session: &str, idx: usize) -> f32 {
 }
 
 /// Vote count floor (see `PageContext::reliable`): 10 votes on default pages, 5 on genre pages.
+/// A Top 10 needs real titles: art, a decent rating, scripted or documentary TV.
+pub fn chart_ok(item: &CatalogItem) -> bool {
+    item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
+        && item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty())
+        && item.vote_average >= 6.0
+        && item.overview_chars() >= 60
+        && !matches!(item.tv_type.as_deref(), Some("Reality") | Some("Video") | Some("News") | Some("Talk Show") | Some("Soap"))
+}
+
 pub fn meets_vote_floor(item: &CatalogItem, genre_page: bool) -> bool {
     !safety_nets() || item.vote_count == 0 || item.vote_count >= if genre_page { 5 } else { 10 }
 }
