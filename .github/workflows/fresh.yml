@@ -1,0 +1,28 @@
+name: Fresh titles
+
+# Pulls new, upcoming and trending titles from TMDB every six hours and puts fresh.json into the private dataset the engine reads.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull from TMDB
+        env:
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
+        run: python3 scripts/pull_fresh.py fresh.json
+      - name: Upload to the dataset
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          pip install -q huggingface_hub
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          HfApi(token=os.environ["HF_TOKEN"]).upload_file(path_or_fileobj="fresh.json", path_in_repo="fresh.json",
+              repo_id="ibrahimar397/streams-catalog", repo_type="dataset", commit_message="Fresh titles")
+          PY
