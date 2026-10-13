@@ -25,6 +25,8 @@ pub struct AppState {
     pub profiles:   Arc<crate::profiles::ProfileStore>,
     /// New, upcoming and trending titles with real release dates (fresh.json, re-read when it changes)
     pub fresh:      crate::fresh::SharedFresh,
+    /// Directors and top billed cast to their titles, for searching by person
+    pub people:     Arc<crate::people::PeopleIndex>,
     pub feed_cache: Cache<String, String>,
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
@@ -123,6 +125,9 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let fresh: crate::fresh::SharedFresh = Arc::new(arc_swap::ArcSwap::from_pointee(fresh_store));
     crate::fresh::spawn_refresh(fresh.clone(), profile_dir.clone());
 
+    let people = Arc::new(crate::people::PeopleIndex::load(&config.db_path));
+    info!("People index: {} names", people.len());
+
     let config = Arc::new(config.clone());
     let taxonomy_bin = config.taxonomy_bin_path.clone();
     let state = Arc::new(AppState {
@@ -135,6 +140,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         mood_vault,
         profiles,
         fresh,
+        people,
         feed_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),

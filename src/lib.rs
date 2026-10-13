@@ -8,6 +8,7 @@ pub mod hnsw;
 pub mod mmr;
 pub mod row_label;
 pub mod mood;
+pub mod people;
 pub mod page;
 pub mod profiles;
 pub mod quality;

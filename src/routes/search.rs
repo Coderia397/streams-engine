@@ -4,11 +4,54 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 use rusqlite::Connection;
 use crate::app::AppState;
+use crate::catalog::CatalogItem;
 use crate::identity::{maturity_of, MaybeCaller, Maturity};
+use crate::people::{normalise, within_edits};
+
+/// Normalised titles with popularity, rebuilt when the catalog is replaced (every five minutes), so a title search is a scan of memory rather than
+/// a ranking of every full text match (which took seconds for words such as "love").
+struct TitleIndex {
+    catalog_ptr: usize,
+    rows: Vec<(u32, f32, String)>,
+}
+
+fn title_index(catalog: &Arc<crate::catalog::CatalogMap>) -> Arc<TitleIndex> {
+    use std::sync::{Mutex, OnceLock};
+    static INDEX: OnceLock<Mutex<Option<Arc<TitleIndex>>>> = OnceLock::new();
+    let slot = INDEX.get_or_init(|| Mutex::new(None));
+    let ptr = Arc::as_ptr(catalog) as usize;
+    if let Some(i) = slot.lock().unwrap().as_ref().filter(|i| i.catalog_ptr == ptr) {
+        return i.clone();
+    }
+    let rows = catalog.values().map(|i| (i.id, i.popularity, format!(" {} ", normalise(&i.title)))).collect();
+    let built = Arc::new(TitleIndex { catalog_ptr: ptr, rows });
+    *slot.lock().unwrap() = Some(built.clone());
+    built
+}
+
+/// Keys of titles whose words all match the query (the last word may be unfinished), exact title first, then titles starting with the query,
+/// then the most popular.
+fn title_matches(index: &TitleIndex, qn: &str, limit: usize) -> Vec<u32> {
+    let words: Vec<&str> = qn.split(' ').filter(|w| !w.is_empty()).collect();
+    let Some((last, head)) = words.split_last() else { return Vec::new() };
+    let exact = format!(" {qn} ");
+    let starts = format!(" {qn}");
+    let head_pats: Vec<String> = head.iter().map(|w| format!(" {w} ")).collect();
+    let last_pat = format!(" {last}");
+    let mut hits: Vec<(u8, f32, u32)> = index
+        .rows
+        .iter()
+        .filter(|(_, _, t)| t.contains(&last_pat) && head_pats.iter().all(|p| t.contains(p.as_str())))
+        .map(|(k, pop, t)| (if *t == exact { 0 } else if t.starts_with(&starts) { 1 } else { 2 }, *pop, *k))
+        .collect();
+    hits.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(a.2.cmp(&b.2)));
+    hits.into_iter().take(limit).map(|h| h.2).collect()
+}
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -20,144 +63,108 @@ pub struct SearchQuery {
 }
 fn default_limit() -> usize { 20 }
 
+fn result_json(item: &CatalogItem) -> Value {
+    json!({
+        "id": item.tmdb_id, "title": item.title, "media_type": item.media_type, "poster_path": item.poster_path, "backdrop_path": item.backdrop_path,
+        "vote_average": item.vote_average, "genres": item.genres, "release_year": item.release_year, "overview": item.overview,
+        "rating": crate::catalog::cert_label(item.cert), "rating_gb": crate::catalog::gb_label(item.cert_gb), "rating_us": crate::catalog::us_label(item.cert_us),
+    })
+}
+
 /// GET /api/search?q=<query>&limit=<n>
-/// Uses the catalog_fts FTS5 index for fast full-text search.
-/// Falls back to in-memory scan if the DB is unreachable.
+/// Titles first (whole words, the last word may be unfinished), then the titles of a person the query names, then titles within a letter
+/// or two of the query (typos). A query that is exactly a person's name lists that person's titles first. Every result carries its real
+/// certificates, and a limited profile only gets titles it may see.
 pub async fn search(
     State(state): State<Arc<AppState>>,
     MaybeCaller(caller): MaybeCaller,
     Query(params): Query<SearchQuery>,
 ) -> impl IntoResponse {
-    let maturity = maturity_of(&caller).or_else(|| params.rating.as_deref().and_then(crate::identity::Maturity::from_rating));
+    let maturity = maturity_of(&caller).or_else(|| params.rating.as_deref().and_then(Maturity::from_rating));
     let q = params.q.trim().to_string();
     let wanted = params.limit.clamp(1, 100);
-    // a restricted profile loses some matches to the filter, so fetch more and trim after
-    let limit = if maturity.is_some_and(|m| m != Maturity::Adult) { (wanted * 4).min(200) } else { wanted };
-
     if q.is_empty() {
         return Json(json!({"results": [], "query": q}));
     }
+    // a limited profile loses some matches to the filter, so look further and trim after
+    let limit = if maturity.is_some_and(|m| m != Maturity::Adult) { (wanted * 4).min(200) } else { wanted };
+    let catalog = state.catalog.load();
 
-    // Try FTS5 first
-    let db_path = state.config.db_path.clone();
-    let q_clone = q.clone();
-    let fts_result = tokio::task::spawn_blocking(move || {
-        fts_search(&db_path, &q_clone, limit)
-    }).await;
-
-    let results = match fts_result {
-        Ok(Ok(rows)) => rows,
-        _ => {
-            // Fallback: in-memory substring search over loaded catalog
-            let catalog = state.catalog.load();
-            let ql = q.to_lowercase();
-            let mut items: Vec<_> = catalog
-                .values()
-                .filter(|item| item.title.to_lowercase().contains(&ql))
-                .collect();
-            items.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap());
-            items.truncate(limit);
-            items.iter().map(|item| json!({
-                "id": item.tmdb_id, "title": item.title, "media_type": item.media_type,
-                "poster_path": item.poster_path, "vote_average": item.vote_average,
-                "genres": item.genres, "release_year": item.release_year, "rating": crate::catalog::cert_label(item.cert), "rating_gb": crate::catalog::gb_label(item.cert_gb), "rating_us": crate::catalog::us_label(item.cert_us),
-            })).collect()
+    // 1. titles whose words match, from memory; matches elsewhere in the text (overview, genres, director) only when titles are few
+    let qn = normalise(&q);
+    let index = title_index(&catalog);
+    let title_keys: Vec<u32> = title_matches(&index, &qn, limit);
+    let other_keys: Vec<u32> = if title_keys.len() < 5 {
+        let db_path = state.config.db_path.clone();
+        let q_clone = q.clone();
+        match tokio::task::spawn_blocking(move || fts_elsewhere(&db_path, &q_clone, limit)).await {
+            Ok(Ok(keys)) => keys,
+            _ => Vec::new(),
         }
+    } else {
+        Vec::new()
     };
 
-    let results: Vec<serde_json::Value> = match maturity {
-        Some(m) if m != Maturity::Adult => {
-            let catalog = state.catalog.load();
-            results
-                .into_iter()
-                .filter(|r| {
-                    let id = r.get("id").and_then(|v| v.as_u64()).map(|v| v as u32);
-                    let mt = r.get("media_type").and_then(|v| v.as_str());
-                    id.and_then(|id| crate::catalog::resolve_key(&catalog, id, mt))
-                        .and_then(|k| catalog.get(&k))
-                        .map_or(false, |item| m.allows(item))
-                })
-                .take(wanted)
-                .collect()
-        }
-        _ => results,
+    // 2. titles of a person the query names
+    let (exact_person, person_keys) = state.people.titles_for(&q, 24);
+
+    // 3. near misses, only when the titles found are few
+    let mut fuzzy_keys: Vec<u32> = Vec::new();
+    if title_keys.len() < 4 && person_keys.is_empty() && qn.chars().count() >= 4 {
+        let max = if qn.chars().count() <= 7 { 1 } else { 2 };
+        let mut hits: Vec<&CatalogItem> = catalog
+            .values()
+            .filter(|i| i.popularity >= 1.0 && i.title.chars().count().abs_diff(qn.chars().count()) <= max)
+            .filter(|i| within_edits(&qn, &normalise(&i.title), max))
+            .collect();
+        hits.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
+        fuzzy_keys = hits.into_iter().take(12).map(|i| i.id).collect();
+    }
+    // with few title matches, near misses compete with them on popularity (a popular title one letter away beats an obscure exact word hit)
+    let (title_keys, fuzzy_keys) = if fuzzy_keys.is_empty() {
+        (title_keys, fuzzy_keys)
+    } else {
+        let mut all: Vec<u32> = title_keys.iter().chain(fuzzy_keys.iter()).copied().collect::<HashSet<u32>>().into_iter().collect();
+        all.sort_by(|a, b| {
+            let (pa, pb) = (catalog.get(a).map_or(0.0, |i| i.popularity), catalog.get(b).map_or(0.0, |i| i.popularity));
+            pb.partial_cmp(&pa).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(b))
+        });
+        (all, Vec::new())
     };
+
+    // a name typed in full lists that person's titles first, unless it is also the name of a title (one word such as "Prince")
+    let named_title = title_keys.iter().filter_map(|k| catalog.get(k)).any(|i| normalise(&i.title) == qn);
+    let person_first = exact_person && (qn.contains(' ') || !named_title);
+    let ordered: Vec<u32> = if person_first {
+        person_keys.iter().take(12).chain(title_keys.iter()).chain(person_keys.iter().skip(12)).chain(other_keys.iter()).copied().collect()
+    } else {
+        title_keys.iter().chain(person_keys.iter()).chain(fuzzy_keys.iter()).chain(other_keys.iter()).copied().collect()
+    };
+    let mut seen: HashSet<u32> = HashSet::new();
+    let results: Vec<Value> = ordered
+        .into_iter()
+        .filter(|k| seen.insert(*k))
+        .filter_map(|k| catalog.get(&k))
+        .filter(|item| maturity.map_or(true, |m| crate::page::maturity_allows_with(m, &state.profiles, item)))
+        .take(wanted)
+        .map(result_json)
+        .collect();
 
     Json(json!({"results": results, "query": q}))
 }
 
-fn fts_search(db_path: &str, q: &str, limit: usize) -> anyhow::Result<Vec<serde_json::Value>> {
+/// Internal item keys of titles whose overview, genres or director hold the query as a phrase, best text match first.
+fn fts_elsewhere(db_path: &str, q: &str, limit: usize) -> anyhow::Result<Vec<u32>> {
     let conn = Connection::open(db_path)?;
-    // FTS5 MATCH query — escape quotes for safety
-    let fts_q = q.replace('"', "\"\"");
-    // catalog_v2 keeps the internal key in `id` (joined to the FTS table) and the TMDB id in `tmdb_id`;
-    // the legacy catalog has only `id`, which is the TMDB id.
-    let has_tmdb_id = conn
-        .prepare("PRAGMA table_info(catalog)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .filter_map(|r| r.ok())
-        .any(|c| c == "tmdb_id");
-    let id_expr = if has_tmdb_id { "c.tmdb_id" } else { "c.id" };
-
-    let map_row = |row: &rusqlite::Row| -> rusqlite::Result<(i64, serde_json::Value)> {
-        let genres_str: String = row.get::<_, Option<String>>(5).unwrap_or(None).unwrap_or_default();
-        let genres: Vec<String> = genres_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let release_year: Option<i32> = row.get::<_, Option<String>>(6)
-            .unwrap_or(None).and_then(|s| s.parse().ok());
-        Ok((row.get::<_, i64>(8)?, json!({
-            "id": row.get::<_, i64>(0)?,
-            "title": row.get::<_, String>(1)?,
-            "media_type": row.get::<_, String>(2)?,
-            "poster_path": row.get::<_, Option<String>>(3)?,
-            "vote_average": row.get::<_, f64>(4)?,
-            "genres": genres,
-            "release_year": release_year,
-        })))
-    };
-
-    // 1. titles containing the query: the 3000 best text matches (keeps very common words fast), then exact
-    //    title first, titles starting with the query next, then by popularity
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity, c.id
-             FROM (SELECT id FROM catalog_fts WHERE catalog_fts MATCH ?1 ORDER BY rank LIMIT 3000) f
-             JOIN catalog c ON c.id = f.id
-             ORDER BY (lower(c.title) = lower(?2)) DESC, (lower(c.title) LIKE lower(?2) || '%') DESC, c.popularity DESC
-             LIMIT ?3"
-        ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![format!("title : \"{}\"", fts_q), q, limit as i64],
-            |row| map_row(row),
-        )?;
-        for r in rows.filter_map(|r| r.ok()) {
-            if seen.insert(r.0) { out.push(r.1); }
-        }
+    let words = normalise(q);
+    if words.is_empty() {
+        return Ok(Vec::new());
     }
-
-    // 2. fill the rest with matches anywhere (overview, genres, director), best text match first
-    if out.len() < limit {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {id_expr}, c.title, c.media_type, c.poster_path, c.vote_average, c.genres, c.release_year, c.popularity, c.id
-             FROM catalog_fts f
-             JOIN catalog c ON c.id = f.id
-             WHERE catalog_fts MATCH ?1
-             ORDER BY rank, c.popularity DESC
-             LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![format!("\"{}\"", fts_q), limit as i64],
-            |row| map_row(row),
-        )?;
-        for r in rows.filter_map(|r| r.ok()) {
-            if out.len() >= limit { break; }
-            if seen.insert(r.0) { out.push(r.1); }
-        }
-    }
-    Ok(out)
+    // only letters and digits reach the query, so nothing in it can be read as full text syntax
+    let phrase_query = format!("\"{words}\"");
+    let mut stmt = conn.prepare(
+        "SELECT c.id FROM catalog_fts f JOIN catalog c ON c.id = f.id WHERE catalog_fts MATCH ?1 ORDER BY rank, c.popularity DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![phrase_query, limit as i64], |r| r.get::<_, i64>(0))?;
+    Ok(rows.filter_map(|r| r.ok()).map(|k| k as u32).collect())
 }

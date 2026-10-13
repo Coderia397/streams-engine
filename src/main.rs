@@ -9,6 +9,7 @@ mod hnsw;
 mod mmr;
 mod row_label;
 mod mood;
+mod people;
 mod page;
 mod profiles;
 mod quality;

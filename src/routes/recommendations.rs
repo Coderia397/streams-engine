@@ -22,8 +22,19 @@ pub struct RecsQuery {
     pub media_type: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Tuning only (ai-engine/scripts/eval_recs.py): weight of popularity, of rating, and of the profile similarity in the mean of the two similarities
+    pub w_pop: Option<f32>,
+    pub w_rate: Option<f32>,
+    pub w_profile: Option<f32>,
 }
 fn default_limit() -> usize { 20 }
+
+/// Weights of popularity and rating in the order of recommendations (measured with ai-engine/scripts/eval_recs.py).
+const REC_POPULARITY_WEIGHT: f32 = 0.15;
+const REC_RATING_WEIGHT: f32 = 0.06;
+/// Share of the profile similarity in the mean of the two similarities. Zero: measured with eval_recs.py on 19 anchors, the text similarity alone
+/// gave 4.3 good titles in the first 10 and the profile similarity alone 1.4 (a mean of the two 2.8 to 3.8), so the profile space is only used on request.
+const REC_PROFILE_WEIGHT: f32 = 0.0;
 
 fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() }
 
@@ -58,10 +69,13 @@ pub async fn recommendations(
 
     let anchor_vec = state.vectors.get_f32(anchor_idx);
     let limit = params.limit.clamp(1, 100);
-    // a restricted profile loses many neighbours to the filter, so look further
-    let fetch = if maturity.is_some_and(|m| m != Maturity::Adult) { limit * 4 + 1 } else { limit + 1 };
+    // many neighbours are dropped (age limit, repeats of one franchise, shorts), so look well beyond the page
+    let restricted = maturity.is_some_and(|m| m != Maturity::Adult);
+    let fetch = (limit * 8).max(80) * if restricted { 2 } else { 1 } + 1;
 
-    // HNSW when the index is ready, brute force otherwise
+    let (w_pop, w_rate, w_profile) = (params.w_pop.unwrap_or(REC_POPULARITY_WEIGHT), params.w_rate.unwrap_or(REC_RATING_WEIGHT), params.w_profile.unwrap_or(REC_PROFILE_WEIGHT).clamp(0.0, 1.0));
+
+    // neighbours by what the catalog text says (HNSW when ready, brute force otherwise) and by what the title is about (profile vectors)
     let mut similar: Vec<(u32, f32)> = Vec::new();
     if ENGINE_READY.load(Ordering::Relaxed) {
         let guard = state.hnsw.read().await;
@@ -72,22 +86,68 @@ pub async fn recommendations(
     if similar.is_empty() {
         similar = state.vectors.brute_force_topk(&anchor_vec, fetch);
     }
+    let profile_near = if w_profile > 0.0 { state.profiles.nearest(anchor_key, fetch.min(160)) } else { Vec::new() };
+    let mut keys: Vec<u32> = similar.iter().map(|(k, _)| *k).chain(profile_near.iter().map(|(k, _)| *k)).filter(|k| *k != anchor_key).collect();
+    let mut seen_keys = std::collections::HashSet::new();
+    keys.retain(|k| seen_keys.insert(*k));
 
     let anchor_c = centred(&state, anchor_idx);
     let anchor_genres: Vec<&String> = anchor_item.genres.iter().collect();
+    let anchor_title = crate::people::normalise(&anchor_item.title);
 
-    let results: Vec<_> = similar
+    // score: the mean of the two similarities when the title has a profile, plus a small push for titles people watch and rate well
+    let mut scored: Vec<(f32, f32, &crate::catalog::CatalogItem)> = keys
         .iter()
-        .filter(|(id, _)| *id != anchor_key) // exclude the anchor itself
-        .filter_map(|(id, sim)| {
-            let item = catalog.get(id)?;
-            if !maturity.map_or(true, |m| m.allows(item)) {
+        .filter_map(|k| {
+            let item = catalog.get(k)?;
+            if !maturity.map_or(true, |m| crate::page::maturity_allows_with(m, &state.profiles, item)) {
                 return None;
             }
-            let c = state.vectors.index_of(*id).map(|i| dot(&anchor_c, &centred(&state, i))).unwrap_or(0.0);
+            // a short (a clip, a making of) is no match for a feature, and another version of the same title is not a new suggestion
+            if item.media_type == "movie" && item.runtime > 0 && item.runtime < 40 && anchor_item.runtime >= 60 {
+                return None;
+            }
+            if item.media_type == anchor_item.media_type && crate::people::normalise(&item.title) == anchor_title {
+                return None;
+            }
+            let from_text = state.vectors.index_of(*k).map(|i| dot(&anchor_c, &centred(&state, i)));
+            let from_profile = if w_profile > 0.0 { state.profiles.centred_cos(anchor_key, *k) } else { None };
+            let sim = match (from_text, from_profile) {
+                (Some(a), Some(b)) => (1.0 - w_profile) * a + w_profile * b,
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => return None,
+            };
+            let quality = (item.popularity.ln_1p() / 100f32.ln_1p()).clamp(0.0, 1.0);
+            let rating = ((item.vote_average - 5.0) / 4.0).clamp(0.0, 1.0);
+            Some((sim + w_pop * quality + w_rate * rating, sim, item))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.2.id.cmp(&b.2.id)));
+
+    // one title once (the best of its versions) and at most three titles from one franchise (the first word they share)
+    let mut seen_titles: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut franchise: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let results: Vec<_> = scored
+        .into_iter()
+        .filter(|(_, _, item)| {
+            let norm = crate::people::normalise(&item.title);
+            if !seen_titles.insert((item.media_type.clone(), norm.clone())) {
+                return false;
+            }
+            let first = norm.split(' ').next().unwrap_or("").to_string();
+            if first.chars().count() >= 4 && first != "the" {
+                let n = franchise.entry(first).or_insert(0);
+                *n += 1;
+                return *n <= 3;
+            }
+            true
+        })
+        .take(limit)
+        .map(|(_, sim, item)| {
             let shared: Vec<&String> = item.genres.iter().filter(|g| anchor_genres.contains(g)).take(2).collect();
             let pills: Vec<&String> = if shared.is_empty() { item.genres.iter().take(2).collect() } else { shared };
-            Some(json!({
+            json!({
                 "id":                item.tmdb_id,
                 "title":             item.title,
                 "media_type":        item.media_type,
@@ -104,11 +164,10 @@ pub async fn recommendations(
                 "rating_us":         crate::catalog::us_label(item.cert_us),
                 "similarity":        sim,
                 "cosine_similarity": sim,
-                "match_percentage":  (c.clamp(0.0, 0.99) * 100.0).round() as u32,
+                "match_percentage":  (sim.clamp(0.0, 0.99) * 100.0).round() as u32,
                 "vibe_pills":        pills,
-            }))
+            })
         })
-        .take(limit)
         .collect();
 
     Json(json!({
