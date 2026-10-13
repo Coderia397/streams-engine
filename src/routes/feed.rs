@@ -280,6 +280,8 @@ fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>) -> Vec<serde_json
                     "tv_type":       it.tv_type,
                     "language":      it.language,
                     "rating":        crate::catalog::cert_label(it.cert),
+                    "rating_gb":     crate::catalog::gb_label(it.cert_gb),
+                    "rating_us":     crate::catalog::us_label(it.cert_us),
                 })
             })
             .collect();

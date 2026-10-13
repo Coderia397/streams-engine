@@ -639,7 +639,7 @@ mod tests {
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
             runtime: 0,
             flags,
-            cert: 0,
+            cert: 0, cert_gb: 0, cert_us: 0,
         }
     }
 

@@ -39,6 +39,9 @@ pub struct CatalogItem {
     pub keywords: Vec<String>,
     /// British age rating of the title as a rank: 0 unknown, 1 U, 2 PG, 3 12, 4 15, 5 18. Taken from the GB certificate, else the US one.
     pub cert: u8,
+    /// The real certificates, kept so a client can show the system its user reads: GB rank 1 to 5 (U, PG, 12, 15, 18), and the US code (see `us_label`). 0 when absent.
+    pub cert_gb: u8,
+    pub cert_us: u8,
     /// Minutes: movie runtime or median episode runtime, 0 when unknown
     pub runtime: u32,
     /// Bit flags computed once at load (see FLAG_*), so page builders never scan titles or keywords per request
@@ -159,6 +162,11 @@ fn json_list(raw: Option<String>, lower: bool) -> Vec<String> {
 
 /// Load the entire catalog from SQLite into a HashMap keyed by `item_key` (type aware).
 /// This is the ONLY place SQLite is accessed — never on the request hot path.
+/// The real GB certificate as a label, None when the title has no GB rating.
+pub fn gb_label(rank: u8) -> Option<&'static str> {
+    Some(match rank { 1 => "U", 2 => "PG", 3 => "12", 4 => "15", 5 => "18", _ => return None })
+}
+
 /// The label a client shows for a certificate rank: the British rating, or NR (not rated) when there is none.
 pub fn cert_label(cert: u8) -> &'static str {
     match cert {
@@ -169,6 +177,36 @@ pub fn cert_label(cert: u8) -> &'static str {
         5 => "18",
         _ => "NR",
     }
+}
+
+/// US certificate codes: 1 G, 2 PG, 3 PG-13, 4 R, 5 NC-17 (films), 6 TV-Y, 7 TV-Y7, 8 TV-G, 9 TV-PG, 10 TV-14, 11 TV-MA.
+pub fn us_label(code: u8) -> Option<&'static str> {
+    Some(match code {
+        1 => "G", 2 => "PG", 3 => "PG-13", 4 => "R", 5 => "NC-17",
+        6 => "TV-Y", 7 => "TV-Y7", 8 => "TV-G", 9 => "TV-PG", 10 => "TV-14", 11 => "TV-MA",
+        _ => return None,
+    })
+}
+
+/// The real GB rank (1 to 5) and US code of a certificates column, each 0 when the country has none that is a rating.
+pub fn cert_codes(certs: Option<&str>) -> (u8, u8) {
+    let Some(text) = certs else { return (0, 0) };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return (0, 0) };
+    let get = |c: &str| v.get(c).and_then(|x| x.as_str()).map(|s| s.trim().to_ascii_uppercase());
+    let gb = match get("GB").as_deref() {
+        Some("U") | Some("UC") => 1,
+        Some("PG") => 2,
+        Some("12") | Some("12A") => 3,
+        Some("15") => 4,
+        Some("18") | Some("R18") => 5,
+        _ => 0,
+    };
+    let us = match get("US").as_deref() {
+        Some("G") => 1, Some("PG") => 2, Some("PG-13") => 3, Some("R") => 4, Some("NC-17") => 5,
+        Some("TV-Y") => 6, Some("TV-Y7") | Some("TV-Y7-FV") => 7, Some("TV-G") => 8, Some("TV-PG") => 9, Some("TV-14") => 10, Some("TV-MA") => 11,
+        _ => 0,
+    };
+    (gb, us)
 }
 
 /// British age rank from the certificates column (a JSON object of country to certificate). The GB certificate wins; otherwise the US one is
@@ -276,6 +314,8 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             keywords,
             runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
             cert:          cert_rank(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()),
+            cert_gb:       cert_codes(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()).0,
+            cert_us:       cert_codes(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()).1,
             flags,
         })
     })?;
@@ -420,6 +460,16 @@ mod cert_tests {
         assert_eq!(cert_rank(Some(r#"{"US":"TV-Y7"}"#)), 2);
         assert_eq!(cert_rank(Some(r#"{"US":"PG-13"}"#)), 3);
         assert_eq!(cert_rank(Some(r#"{"US":"TV-MA"}"#)), 5);
+    }
+
+    #[test]
+    fn both_real_certificates_are_kept() {
+        use super::{cert_codes, us_label};
+        assert_eq!(cert_codes(Some(r#"{"GB":"15","US":"TV-14"}"#)), (4, 10));
+        assert_eq!(cert_codes(Some(r#"{"US":"PG-13"}"#)), (0, 3));
+        assert_eq!(cert_codes(Some(r#"{"GB":"12A"}"#)), (3, 0));
+        assert_eq!(cert_codes(Some(r#"{"US":"NR"}"#)), (0, 0));
+        assert_eq!((us_label(10), us_label(4), us_label(0)), (Some("TV-14"), Some("R"), None));
     }
 
     #[test]

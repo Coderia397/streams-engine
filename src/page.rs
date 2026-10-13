@@ -174,6 +174,8 @@ pub struct RowItem {
     pub language:     String,
     /// British age rank of the title (0 unknown), see `catalog::cert_rank`
     pub cert:         u8,
+    pub cert_gb:      u8,
+    pub cert_us:      u8,
 }
 
 impl RowItem {
@@ -193,6 +195,8 @@ impl RowItem {
             tv_type:       item.tv_type.clone(),
             language:      item.original_language.clone(),
             cert:          item.cert,
+            cert_gb:       item.cert_gb,
+            cert_us:       item.cert_us,
         }
     }
 }

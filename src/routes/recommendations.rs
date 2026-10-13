@@ -100,6 +100,8 @@ pub async fn recommendations(
                 "backdrop_path":     item.backdrop_path,
                 "vote_average":      item.vote_average,
                 "rating":            crate::catalog::cert_label(item.cert),
+                "rating_gb":         crate::catalog::gb_label(item.cert_gb),
+                "rating_us":         crate::catalog::us_label(item.cert_us),
                 "similarity":        sim,
                 "cosine_similarity": sim,
                 "match_percentage":  (c.clamp(0.0, 0.99) * 100.0).round() as u32,
