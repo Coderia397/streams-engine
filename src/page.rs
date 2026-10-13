@@ -211,6 +211,7 @@ pub struct PageContext<'a> {
     pub vault:       &'a CentroidVault,
     pub taxonomy:    &'a TaxonomyStore,
     pub mood_vault:  &'a MoodVault,
+    pub profiles:    &'a crate::profiles::ProfileStore,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
     /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
@@ -231,10 +232,41 @@ pub struct PageContext<'a> {
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
-            && self.genre_spec.map_or(true, |spec| spec.matches(item))
+            && self.genre_ok(item)
             && self.audience_fits(item)
-            && self.maturity.map_or(true, |m| m.allows(item))
+            && self.maturity.map_or(true, |m| self.maturity_allows(m, item))
             && (!safety_nets() || self.allowed_by_nets(item))
+    }
+
+    /// The page's genre rule. The Pride page trusts the model's profile when the title has one: LGBTQ+ must be central to the story (measured
+    /// 51 of 53 correct on titles graded by hand, against 18 of 50 for "present"); a title without a profile keeps the keyword rule.
+    fn genre_ok(&self, item: &CatalogItem) -> bool {
+        let Some(spec) = self.genre_spec else { return true };
+        if matches!(spec, crate::genre_spec::GenreSpec::Lgbtq) {
+            if let Some(p) = self.profiles.get(item.id) {
+                return p.lgbtq == crate::profiles::Lgbtq::Central;
+            }
+        }
+        spec.matches(item)
+    }
+
+    /// May this tier see the title? A real certificate decides (see `Maturity::allows`). A title with no certificate but a profile is judged by
+    /// the profile (strict rule for children, no sexual content for teenagers); without either the older genre and keyword rules apply.
+    fn maturity_allows(&self, m: crate::identity::Maturity, item: &CatalogItem) -> bool {
+        use crate::identity::Maturity;
+        if item.cert == 0 && !matches!(m, Maturity::Adult) {
+            if let Some(p) = self.profiles.get(item.id) {
+                if item.adult || item.flags & crate::catalog::FLAG_SUGGESTIVE != 0 {
+                    return false;
+                }
+                return match m {
+                    Maturity::LittleKids | Maturity::OlderKids => p.suits_children(),
+                    Maturity::Twelve => p.suits_teens(),
+                    _ => !p.content.iter().any(|c| matches!(c.as_str(), "sex" | "nudity")),
+                };
+            }
+        }
+        m.allows(item)
     }
 
     /// A page of an adult genre (Action, Thriller, Pride...) does not carry children's titles for an adult or an anonymous
@@ -246,6 +278,9 @@ impl<'a> PageContext<'a> {
         }
         if item.cert != 0 {
             return item.cert >= 3; // U and PG are children's and family ratings
+        }
+        if let Some(p) = self.profiles.get(item.id) {
+            return p.audience & (crate::profiles::TEEN | crate::profiles::ADULT) != 0;
         }
         !item.genres.iter().any(|g| g.eq_ignore_ascii_case("Kids") || g.eq_ignore_ascii_case("Family"))
     }
@@ -854,11 +889,30 @@ impl<'a> PageContext<'a> {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.id.cmp(&b.id))
         });
+        // Variety: on a page that is not about anime, Japanese language titles fill at most a third of the pool (they are many among the best
+        // rated series and would otherwise fill most rows).
+        if !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime)) {
+            let mut japanese = 0usize;
+            pool.retain(|i| {
+                if i.original_language == "ja" {
+                    japanese += 1;
+                    japanese <= POOL / 3
+                } else {
+                    true
+                }
+            });
+        }
         pool.truncate(POOL);
 
+        // With title profiles the page is built in the space of what the titles are about (the profile vectors); a title with no profile is left
+        // out. Without them it uses the catalog vectors as before.
+        let profile_mode = !self.profiles.vectors.is_empty();
         let items: Vec<(&CatalogItem, Vec<f32>)> = pool
             .into_iter()
             .filter_map(|i| {
+                if profile_mode {
+                    return self.profiles.vector(i.id).map(|v| (i, v));
+                }
                 let idx = self.vectors.index_of(i.id)?;
                 if self.vectors.is_zero_row(idx) {
                     return None;
@@ -928,9 +982,14 @@ impl<'a> PageContext<'a> {
         let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
         let anime_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime));
         let mut anime_count = vec![0usize; k];
+        // Japanese language titles count with anime for the variety cap below (Japanese superhero and mecha shows are not all flagged as anime)
+        let mut japanese_count = vec![0usize; k];
         for (i, &(c, _)) in assign.iter().enumerate() {
             if items[i].0.is_anime {
                 anime_count[c] += 1;
+            }
+            if items[i].0.original_language == "ja" {
+                japanese_count[c] += 1;
             }
         }
         let mut order: Vec<(usize, f32)> = (0..k)
@@ -948,6 +1007,25 @@ impl<'a> PageContext<'a> {
             })
             .collect();
         order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Variety: on a page that is not about anime, at most two anime clusters sit among the first rows; the rest follow the other clusters.
+        if !anime_page {
+            let is_anime = |c: usize| {
+                let size = assign.iter().filter(|(a, _)| *a == c).count();
+                size > 0 && anime_count[c].max(japanese_count[c]) * 10 > size * 4
+            };
+            let mut kept = 0;
+            let (mut early, mut late): (Vec<(usize, f32)>, Vec<(usize, f32)>) = (Vec::new(), Vec::new());
+            for entry in order.drain(..) {
+                if is_anime(entry.0) {
+                    kept += 1;
+                    if kept <= 2 { early.push(entry) } else { late.push(entry) }
+                } else {
+                    early.push(entry)
+                }
+            }
+            early.extend(late);
+            order = early;
+        }
 
         let first_thematic = rows.len();
         let mut state = PageState::new();
@@ -1011,7 +1089,15 @@ impl<'a> PageContext<'a> {
                 &dom,
             );
             let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
+            // concrete names from the catalog's own keywords come first; then the theme most of the row's titles share (from their profiles, when at
+            // least half of them have one and half of those carry it); then the older generic names
             let mut candidates = crate::row_label::candidates(&row_catalog);
+            let row_profiles: Vec<&crate::profiles::TitleProfile> = rows[row_idx].items.iter().filter_map(|i| self.profiles.get(i.id)).collect();
+            if row_profiles.len() * 2 >= rows[row_idx].items.len() {
+                if let Some((theme, _)) = crate::profiles::row_theme(&row_profiles, 0.5) {
+                    candidates.extend(crate::row_label::theme_title(&theme, &row_catalog));
+                }
+            }
             candidates.extend(derive_title(
                 &centers[c], &dom, second.as_deref(), era.as_deref(),
                 rows[row_idx].items.first().map(|i| i.title.as_str()),

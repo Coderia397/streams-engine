@@ -21,6 +21,8 @@ pub struct AppState {
     pub vault:      Arc<CentroidVault>,
     pub taxonomy:   Arc<TaxonomyStore>,
     pub mood_vault: Arc<MoodVault>,
+    /// Model written title profiles and their vectors (empty when the files are missing)
+    pub profiles:   Arc<crate::profiles::ProfileStore>,
     pub feed_cache: Cache<String, String>,
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
@@ -110,6 +112,10 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         if ENGINE_READY.load(Ordering::Relaxed) { "HNSW" } else { "brute-force" }
     );
 
+    let profile_dir = std::path::Path::new(&config.db_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let profiles = Arc::new(crate::profiles::ProfileStore::load(&profile_dir));
+    info!("Title profiles: {} ({} with vectors)", profiles.profiles.len(), profiles.vectors.len() / crate::profiles::DIMS);
+
     let config = Arc::new(config.clone());
     let taxonomy_bin = config.taxonomy_bin_path.clone();
     let state = Arc::new(AppState {
@@ -120,6 +126,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         vault,
         taxonomy,
         mood_vault,
+        profiles,
         feed_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),

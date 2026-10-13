@@ -9,6 +9,7 @@ mod mmr;
 mod row_label;
 mod mood;
 mod page;
+mod profiles;
 mod quality;
 mod routes;
 mod sessions;

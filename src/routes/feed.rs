@@ -221,6 +221,7 @@ pub async fn feed(
         vault:      &state.vault,
         taxonomy:   &state.taxonomy,
         mood_vault: &state.mood_vault,
+        profiles:   &state.profiles,
         surface,
         genre,
         genre_spec: genre_spec.as_ref(),

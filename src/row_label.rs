@@ -214,6 +214,33 @@ pub fn primary_country(it: &CatalogItem) -> Option<&str> {
     fits_language(first, &it.original_language).then(|| first.as_str())
 }
 
+/// "found family" with a row of mostly dramas becomes "Found Family Dramas"; with no genre noun, "Found Family Stories". None for a theme that is
+/// empty, longer than three words, or too generic to name a row alone.
+pub fn theme_title(theme: &str, items: &[&CatalogItem]) -> Option<String> {
+    let words: Vec<&str> = theme.split_whitespace().collect();
+    if words.is_empty() || words.len() > 3 || matches!(theme, "entertainment" | "comedy" | "drama" | "humor" | "action" | "family") {
+        return None;
+    }
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for it in items {
+        let mut seen: Vec<&str> = Vec::new();
+        for g in &it.genres {
+            let k = genre_key(g);
+            if !seen.contains(&k) {
+                seen.push(k);
+                *count.entry(k).or_insert(0) += 1;
+            }
+        }
+    }
+    let top = count.into_iter().filter(|(g, c)| noun(g).is_some() && *c * 2 >= items.len()).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).and_then(|(g, _)| noun(g));
+    let title_case = words.iter().map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(" ");
+    // a one word theme is an idea, not a kind of title ("Identity Action" reads wrong): "Stories of Identity". Longer themes name a kind of title.
+    if words.len() == 1 {
+        return Some(format!("Stories of {title_case}"));
+    }
+    Some(format!("{title_case} {}", top.unwrap_or("Stories")))
+}
+
 /// Title candidates for a row, most specific first. Empty when nothing specific can be said.
 pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let n = items.len();
