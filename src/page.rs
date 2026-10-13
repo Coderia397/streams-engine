@@ -203,6 +203,7 @@ impl RowItem {
 
 // ── PageContext ───────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct PageContext<'a> {
     pub catalog:     &'a CatalogMap,
     pub vectors:     &'a VectorStore,
@@ -217,6 +218,8 @@ pub struct PageContext<'a> {
     pub today_ymd:   String,
     /// Original language code (a language page); every row holds only titles in that language
     pub language:    Option<&'a str>,
+    /// Children's home only: build the page from the animated titles (`Some(true)`) or from the live action ones (`Some(false)`)
+    pub animation:   Option<bool>,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
     /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
@@ -393,6 +396,9 @@ impl<'a> PageContext<'a> {
         // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
         // seeds, which are mostly adult topics with a few allowed titles left in each.
         let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty();
+        if kids_home && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
+            return self.build_kids_home();
+        }
         if self.genre.is_some() || self.language.is_some() || kids_home {
             return self.build_genre_page();
         }
@@ -890,6 +896,31 @@ impl<'a> PageContext<'a> {
     /// Rows for a genre filtered page. The global seeds hold too few titles of any
     /// single genre, so cluster the genre's own best titles on the fly instead
     /// (farthest first init, a few Lloyd rounds) to get sub-topics inside the genre.
+    /// A children's home: half the rows from live action titles, half from animated ones, alternating, so the page is not all cartoons. Each half is
+    /// a page of its own (clustered from its own titles); the charts come from the live action half, which is built over the whole pool.
+    fn build_kids_home(&self) -> Vec<Row> {
+        let half = (self.target_rows / 2).max(4) + 1;
+        let live = PageContext { animation: Some(false), target_rows: half, ..self.clone() }.build_genre_page();
+        let anim = PageContext { animation: Some(true), target_rows: half, ..self.clone() }.build_genre_page();
+        let (charts, live_rows): (Vec<Row>, Vec<Row>) = live.into_iter().partition(|r| r.archetype == "trending");
+        let anim_rows: Vec<Row> = anim.into_iter().filter(|r| r.archetype != "trending").collect();
+        let mut out: Vec<Row> = charts;
+        let (mut a, mut l) = (anim_rows.into_iter(), live_rows.into_iter());
+        loop {
+            match (l.next(), a.next()) {
+                (None, None) => break,
+                (lr, ar) => {
+                    out.extend(lr);
+                    out.extend(ar);
+                }
+            }
+        }
+        // a row name used twice by the two halves keeps its first use
+        let mut seen: HashSet<String> = HashSet::new();
+        out.retain(|r| r.archetype == "trending" || seen.insert(r.title.clone()));
+        out
+    }
+
     fn build_genre_page(&self) -> Vec<Row> {
         const POOL: usize = 3000;
         const MIN_CLUSTER: usize = 8;
@@ -899,10 +930,12 @@ impl<'a> PageContext<'a> {
             rows.push(r);
         }
 
+        // a children's home holds titles made for children; a genre page chosen by a children's profile (Comedies, Adventure) keeps every title it may see
+        let kids_home = self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids());
         let mut pool: Vec<&CatalogItem> = self
             .catalog
             .values()
-            .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
+            .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.map_or(true, |a| a == i.genres.iter().any(|g| g == "Animation")))
             .collect();
         // ties are broken by id so a page does not depend on the hash map order of the catalog (which changes at every reload)
         pool.sort_unstable_by(|a, b| {
@@ -1335,6 +1368,8 @@ impl<'a> PageContext<'a> {
             .values()
             .filter(|item| self.matches_filters(item) && only.map_or(true, |t| item.media_type == t))
             .filter(|item| !nets || chart_ok(item))
+            // a children's Top 10 holds titles made for children, as the rest of their home does
+            .filter(|item| !(self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty()) || kid_interest(self.profiles, item))
             // a title that has not come out yet is not in a Top 10 of what people watch
             .filter(|item| !self.fresh.is_upcoming(&item.media_type, item.tmdb_id, &self.today_ymd))
             .collect();
@@ -1462,6 +1497,15 @@ fn entry_noise(session: &str, idx: usize) -> f32 {
 }
 
 /// Vote count floor (see `PageContext::reliable`): 10 votes on default pages, 5 on genre pages.
+/// Whether a title is made for children, for a children's home page: the title's profile says kids or family, or (no profile) it is a Kids, Family
+/// or Animation title. A U or PG certificate alone is not enough: an old U-rated Western is safe for a child and still not a child's title.
+pub fn kid_interest(profiles: &crate::profiles::ProfileStore, item: &CatalogItem) -> bool {
+    match profiles.get(item.id) {
+        Some(p) => p.audience & (crate::profiles::KIDS | crate::profiles::FAMILY) != 0,
+        None => item.genres.iter().any(|g| matches!(g.as_str(), "Kids" | "Family" | "Animation")),
+    }
+}
+
 /// Whether a title's original language belongs to a language page: TMDB writes Chinese as `zh` or `cn` and Norwegian as `no` or `nb`.
 pub fn language_matches(page: &str, original: &str) -> bool {
     page == original || matches!((page, original), ("zh", "cn") | ("no", "nb"))

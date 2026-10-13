@@ -264,6 +264,7 @@ pub async fn feed(
         fresh:      &fresh,
         today_ymd:  crate::fresh::ymd(crate::fresh::today_days()),
         language:   language.as_deref(),
+        animation:  None,
         surface,
         genre,
         genre_spec: genre_spec.as_ref(),
