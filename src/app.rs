@@ -17,6 +17,8 @@ pub struct AppState {
     pub catalog:    SharedCatalog,
     pub vectors:    Arc<VectorStore>,
     pub hnsw:       Arc<RwLock<Option<HnswIndex>>>,
+    /// Index over the title profile vectors (the quality titles), which row definitions are matched against; none until built
+    pub profile_hnsw: Arc<RwLock<Option<HnswIndex>>>,
     pub seeds:      Arc<ClusterSeeds>,
     pub vault:      Arc<CentroidVault>,
     pub taxonomy:   Arc<TaxonomyStore>,
@@ -56,8 +58,12 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     // 3b. Corpus mean and centred taxonomy vectors
     let mean = Arc::new(vectors.compute_mean());
     let mut taxonomy = taxonomy;
+    // Row definitions are matched against the title profile vectors when those exist, so they are centred on the mean of the profile vectors
+    // (a different text from the catalog's, with a different mean); otherwise on the catalog mean.
+    let profile_dir0 = std::path::Path::new(&config.db_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let profiles0 = crate::profiles::ProfileStore::load(&profile_dir0);
     if let Some(t) = Arc::get_mut(&mut taxonomy) {
-        t.center_with(&mean);
+        if profiles0.mean.len() == crate::profiles::DIMS { t.center_with(&profiles0.mean); } else { t.center_with(&mean); }
     }
 
     // 4. Cluster seeds
@@ -117,8 +123,14 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     );
 
     let profile_dir = std::path::Path::new(&config.db_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let profiles = Arc::new(crate::profiles::ProfileStore::load(&profile_dir));
+    let profiles = Arc::new(profiles0);
     info!("Title profiles: {} ({} with vectors)", profiles.profiles.len(), profiles.vectors.len() / crate::profiles::DIMS);
+
+    // The profile vectors cover the quality titles only, so a row definition finds its titles among them instead of among 650,000 mostly obscure ones.
+    let profile_hnsw: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
+    if !profiles.keys.is_empty() && profiles.vectors.len() == profiles.keys.len() * crate::profiles::DIMS {
+        spawn_profile_index(profile_hnsw.clone(), profiles.clone(), format!("{profile_dir}/profile_vectors_v1.bin.hnsw"));
+    }
 
     let fresh_store = crate::fresh::FreshStore::load(&profile_dir);
     info!("Fresh titles: {} ({})", fresh_store.items.len(), fresh_store.generated);
@@ -134,6 +146,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         catalog,
         vectors,
         hnsw: hnsw_slot,
+        profile_hnsw,
         seeds,
         vault,
         taxonomy,
@@ -153,14 +166,41 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     Ok(state)
 }
 
+/// Background task: loads the index over the profile vectors from disk, or builds it (about a minute) and saves it for the next start.
+fn spawn_profile_index(slot: Arc<RwLock<Option<HnswIndex>>>, profiles: Arc<crate::profiles::ProfileStore>, path: String) {
+    tokio::spawn(async move {
+        let built = tokio::task::spawn_blocking(move || -> anyhow::Result<HnswIndex> {
+            if std::path::Path::new(&path).exists() {
+                if let Ok(idx) = HnswIndex::load(&path) {
+                    if idx.len() == profiles.keys.len() {
+                        return Ok(idx);
+                    }
+                }
+            }
+            let idx = HnswIndex::build_from_f16(&profiles.keys, &profiles.vectors)?;
+            let _ = idx.save(&path);
+            Ok(idx)
+        })
+        .await;
+        match built {
+            Ok(Ok(idx)) => *slot.write().await = Some(idx),
+            Ok(Err(e)) => tracing::warn!("profile index not built: {e}"),
+            Err(e) => tracing::warn!("profile index task failed: {e}"),
+        }
+    });
+}
+
 /// Background task: once the HNSW index is ready, load or compute how many quality
 /// titles each taxonomy entry can fill, so pages only consider entries that work.
 fn spawn_support(state: Arc<AppState>, taxonomy_bin: String) {
     tokio::spawn(async move {
-        while !ENGINE_READY.load(Ordering::Relaxed) {
+        let wants_profile_index = !state.profiles.keys.is_empty();
+        loop {
+            let ready = if wants_profile_index { state.profile_hnsw.read().await.is_some() } else { ENGINE_READY.load(Ordering::Relaxed) };
+            if ready { break; }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        let guard = state.hnsw.clone().read_owned().await;
+        let guard = if wants_profile_index { state.profile_hnsw.clone().read_owned().await } else { state.hnsw.clone().read_owned().await };
         let st = state.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let Some(idx) = guard.as_ref() else { return };

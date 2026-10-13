@@ -19,6 +19,9 @@ pub struct TaxonomyEntry {
     pub kind: String,
     /// Date window for seasonal rows (None means always eligible)
     pub season: Option<Season>,
+    /// Seasonal rows only: catalog keywords a title must carry to fill the row, and whether the title profile must say LGBTQ+ is central
+    pub keywords: Vec<String>,
+    pub lgbtq_central: bool,
     /// L2-normalised 2560d embedding of the `vibe_query` string
     pub embedding: Vec<f32>,
     /// `embedding` minus the corpus mean vector, renormalised. Cosine in this
@@ -71,6 +74,10 @@ fn parse_season(v: &serde_json::Value) -> Option<Season> {
 
 /// Today's (month, day) in UTC, without a date library.
 pub fn today_md() -> (u8, u8) {
+    // STREAMS_TODAY=MM-DD pretends it is that day (to check seasonal rows)
+    if let Some((m, d)) = std::env::var("STREAMS_TODAY").ok().as_deref().and_then(|v| v.split_once('-')).and_then(|(m, d)| Some((m.parse().ok()?, d.parse().ok()?))) {
+        return (m, d);
+    }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -102,6 +109,10 @@ struct TaxonomyMeta {
     kind: Option<String>,
     #[serde(default)]
     seasonal: Option<serde_json::Value>,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    lgbtq_central: bool,
 }
 
 /// In-memory store of all taxonomy embeddings.
@@ -158,6 +169,8 @@ impl TaxonomyStore {
                 media_type: meta.media_type,
                 kind: meta.kind.unwrap_or_default(),
                 season,
+                keywords: meta.keywords.iter().map(|k| k.to_lowercase()).collect(),
+                lgbtq_central: meta.lgbtq_central,
                 centered: Vec::new(),
                 embedding,
             });

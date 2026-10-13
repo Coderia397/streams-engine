@@ -256,6 +256,7 @@ pub async fn feed(
         catalog:    &catalog,
         vectors:    &state.vectors,
         hnsw:       &state.hnsw,
+        profile_hnsw: &state.profile_hnsw,
         seeds:      &state.seeds,
         vault:      &state.vault,
         taxonomy:   &state.taxonomy,

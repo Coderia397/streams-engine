@@ -78,6 +78,19 @@ impl HnswIndex {
         Ok(Self { inner })
     }
 
+    /// Build an index over raw float16 rows (`DIMS` per row), one key per row, in parallel. Used for the index over the title profile vectors.
+    pub fn build_from_f16(keys: &[u32], rows: &[u16]) -> Result<Self> {
+        let inner = Index::new(&Self::make_options())?;
+        inner.reserve_capacity_and_threads(keys.len(), rayon::current_num_threads())?;
+        (0..keys.len()).into_par_iter().try_for_each(|i| -> Result<()> {
+            let v: Vec<f32> = rows[i * DIMS..(i + 1) * DIMS].iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();
+            inner.add(keys[i] as u64, &v)?;
+            Ok(())
+        })?;
+        info!("HNSW index built over {} profile vectors", inner.size());
+        Ok(Self { inner })
+    }
+
     /// Persist the index atomically (temp file then rename) so a crash mid-save
     /// never leaves a truncated index for the next boot.
     pub fn save(&self, path: &str) -> Result<()> {

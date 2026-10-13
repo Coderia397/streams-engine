@@ -208,6 +208,8 @@ pub struct PageContext<'a> {
     pub catalog:     &'a CatalogMap,
     pub vectors:     &'a VectorStore,
     pub hnsw:        &'a RwLock<Option<HnswIndex>>,
+    /// Index over the title profile vectors; row definitions are matched against it when it is built
+    pub profile_hnsw: &'a RwLock<Option<HnswIndex>>,
     pub seeds:       &'a ClusterSeeds,
     pub vault:       &'a CentroidVault,
     pub taxonomy:    &'a TaxonomyStore,
@@ -392,7 +394,79 @@ impl<'a> PageContext<'a> {
         self.place_charts(rows)
     }
 
+    /// The rows of the page: the topic rows, with up to two seasonal rows (from the row vocabulary, only inside their calendar window) placed near the top
+    /// of the home, films and series pages.
     async fn build_page_rows(&self) -> Vec<Row> {
+        let mut rows = self.build_page_rows_inner().await;
+        let kids = self.maturity.is_some_and(|m| m.is_kids());
+        if self.genre.is_none() && self.language.is_none() && self.animation.is_none() && !kids && !self.taxonomy.entries.is_empty() {
+            let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+            for (n, row) in self.build_seasonal_rows(&used).await.into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).enumerate() {
+                let at = (if n == 0 { 2 } else { 5 }).min(rows.len());
+                rows.insert(at, row);
+            }
+        }
+        rows
+    }
+
+    /// Up to two rows for what is in season (taxonomy entries of type calendar whose window is active today): the entry's description is matched against the title
+    /// profiles, the titles are filtered like any page (age limit, quality) and a row needs at least MIN titles that no other row has.
+    async fn build_seasonal_rows(&self, used: &HashSet<u32>) -> Vec<Row> {
+        const MIN: usize = 8;
+        let mut cands: Vec<usize> = self
+            .taxonomy
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.kind == "calendar"
+                    && e.season.map_or(false, |s| s.active_on(self.today))
+                    && (e.media_type == "both" || e.media_type == self.surface || self.surface == "both")
+                    && !entry_names_other_kind(&e.title, self.surface)
+                    && !e.centered.is_empty()
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // a session sees a stable choice among the active entries
+        cands.sort_by(|a, b| entry_noise(self.session, *b).partial_cmp(&entry_noise(self.session, *a)).unwrap_or(std::cmp::Ordering::Equal));
+        let mut rows: Vec<Row> = Vec::new();
+        let mut taken: HashSet<u32> = used.clone();
+        let mut chosen_centred: Vec<&Vec<f32>> = Vec::new();
+        for idx in cands.into_iter().take(8) {
+            if rows.len() >= 2 { break; }
+            let e = &self.taxonomy.entries[idx];
+            if chosen_centred.iter().any(|c| cosine_sim(c, &e.centered) > 0.85) { continue; }
+            // the titles of the season: those that carry one of the event's keywords (or, for Pride, whose profile says LGBTQ+ is central), ranked by how close
+            // their profile is to the row's description and by quality; an event with too few such titles gets no row
+            let mut pool: Vec<(f32, u32)> = Vec::new();
+            for item in self.catalog.values() {
+                let in_season = if e.lgbtq_central {
+                    self.profiles.get(item.id).is_some_and(|p| p.lgbtq == crate::profiles::Lgbtq::Central)
+                } else {
+                    !e.keywords.is_empty() && item.keywords.iter().any(|k| e.keywords.iter().any(|w| w == k))
+                };
+                if !in_season || taken.contains(&item.id) || !self.matches_filters(item) || !passes_member_quality(item) || !self.reliable(item) {
+                    continue;
+                }
+                let sim = self.profiles.vector(item.id).map(|v| cosine_sim(&v, &e.embedding)).unwrap_or(0.0);
+                pool.push((sim + 0.15 * (crate::quality::item_quality(item) / 35.0).min(1.5), item.id));
+            }
+            pool.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+            let ids: Vec<u32> = pool.into_iter().take(ROW_SIZE * 4).map(|(_, id)| id).collect();
+            if ids.len() < MIN { continue; }
+            let cand_vecs: Vec<(u32, Vec<f32>)> = ids.iter().filter_map(|id| self.profiles.vector(*id).map(|v| (*id, v))).collect();
+            let picked = greedy_mmr(&e.embedding, &cand_vecs, ROW_SIZE, MMR_LAMBDA);
+            let items: Vec<RowItem> = picked.iter().filter_map(|id| self.catalog.get(id).map(RowItem::from_catalog)).collect();
+            if items.len() < MIN { continue; }
+            items.iter().for_each(|i| { taken.insert(i.id); });
+            chosen_centred.push(&e.centered);
+            rows.push(Row { title: clamp_words(&e.title, 5), archetype: "thematic".to_string(), kind: e.kind.clone(), items });
+        }
+        rows
+    }
+
+    async fn build_page_rows_inner(&self) -> Vec<Row> {
         // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
         // seeds, which are mostly adult topics with a few allowed titles left in each.
         let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty();
@@ -402,7 +476,9 @@ impl<'a> PageContext<'a> {
         if self.genre.is_some() || self.language.is_some() || kids_home {
             return self.build_genre_page();
         }
-        if self.taxonomy.entries.len() >= MIN_TAXONOMY_FOR_ENTRY_ROWS {
+        // The page built wholly from row definitions is off unless asked for (STREAMS_ENTRY_PAGES=1): measured 2026-10-13, its row names are vaguer and it fills
+        // fewer rows than the topic rows; the vocabulary is used for seasonal rows (build_seasonal_rows).
+        if std::env::var("STREAMS_ENTRY_PAGES").is_ok() && self.taxonomy.entries.len() >= MIN_TAXONOMY_FOR_ENTRY_ROWS {
             let rows = self.build_entry_page().await;
             if rows.len() > 2 {
                 return rows;
@@ -697,6 +773,8 @@ impl<'a> PageContext<'a> {
             .enumerate()
             .filter(|(i, e)| {
                 (e.media_type == "both" || e.media_type == self.surface || self.surface == "both")
+                    // a row for "both" that names the other kind (a films row on the series page) stays off this page
+                    && !entry_names_other_kind(&e.title, self.surface)
                     && e.season.map_or(true, |s| s.active_on(self.today))
                     && !e.centered.is_empty()
                     && self.taxonomy.support_for(*i, self.surface).map_or(true, |n| n >= MIN_SUPPORT)
@@ -733,12 +811,14 @@ impl<'a> PageContext<'a> {
 
         // 2. Retrieve titles per shortlisted entry in parallel
         struct Cand { idx: usize, exploit: f32, explore: f32, hits: Vec<u32> }
-        let guard = self.hnsw.read().await;
+        let main_guard = self.hnsw.read().await;
+        let prof_guard = self.profile_hnsw.read().await;
+        let guard: &Option<HnswIndex> = if prof_guard.is_some() { &prof_guard } else { &main_guard };
         let cands: Vec<Cand> = pick_idx
             .par_iter()
             .filter_map(|&idx| {
                 let e = &self.taxonomy.entries[idx];
-                let hits = self.retrieve_sync(&guard, &e.embedding, ANN_ENTRY_K);
+                let hits = self.retrieve_sync(guard, &e.embedding, ANN_ENTRY_K);
                 let good: Vec<(&CatalogItem, f32)> = hits
                     .iter()
                     .filter_map(|(id, sim)| self.catalog.get(id).map(|i| (i, *sim)))
@@ -761,8 +841,12 @@ impl<'a> PageContext<'a> {
                 })
             })
             .collect();
-        drop(guard);
+        drop(prof_guard);
+        drop(main_guard);
         let t_retrieve = t0.elapsed();
+        if std::env::var("STREAMS_DEBUG_ENTRIES").is_ok() {
+            eprintln!("entries: eligible {n_eligible}, shortlisted {}, with enough titles {} (surface {})", pick_idx.len(), cands.len(), self.surface);
+        }
 
         // 3. Selection: score based diversification (MMR over row definitions) under page rules
         let max_per_type = (((want as f32) * 0.16).ceil() as usize).max(2);
@@ -815,6 +899,9 @@ impl<'a> PageContext<'a> {
             chosen.push((cands[ci].idx, fresh));
         }
         let t_select = t0.elapsed();
+        if std::env::var("STREAMS_DEBUG_ENTRIES").is_ok() {
+            eprintln!("entries: chosen {} of wanted {want}", chosen.len());
+        }
 
         // 4. Fill rows: MMR over each row's own candidates
         let mut state = PageState::new();
@@ -1509,6 +1596,14 @@ pub fn kid_interest(profiles: &crate::profiles::ProfileStore, item: &CatalogItem
 /// Whether a title's original language belongs to a language page: TMDB writes Chinese as `zh` or `cn` and Norwegian as `no` or `nb`.
 pub fn language_matches(page: &str, original: &str) -> bool {
     page == original || matches!((page, original), ("zh", "cn") | ("no", "nb"))
+}
+
+/// True when a row title names films on a series page or series on a films page.
+fn entry_names_other_kind(title: &str, surface: &str) -> bool {
+    let t = title.to_lowercase();
+    let films = t.split(' ').any(|w| matches!(w, "film" | "films" | "movie" | "movies" | "cinema"));
+    let series = t.split(' ').any(|w| matches!(w, "series" | "show" | "shows" | "sitcom" | "sitcoms" | "episodes"));
+    (surface == "tv" && films) || (surface == "movie" && series)
 }
 
 /// A Top 10 needs real titles: art, a decent rating, scripted or documentary TV.
