@@ -47,15 +47,17 @@ const MIN_ROWS_FLOOR: usize = 8; // two desktop screens
 const ROW_TITLES: usize = 15;
 const SESSION_TURNOVER: usize = 2;
 /// Below this a genre has too few rows to be its own page.
-const MIN_GENRE_PAGE_ROWS: usize = 8;
+pub const MIN_GENRE_PAGE_ROWS: usize = 8;
 
 /// Rows a genre page can support for this surface, from the size of its quality pool.
-fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &crate::genre_spec::GenreSpec) -> usize {
+pub fn genre_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, spec: &crate::genre_spec::GenreSpec, maturity: Option<crate::identity::Maturity>) -> usize {
     let pool = catalog
         .values()
         .filter(|i| {
             (surface == "both" || i.media_type == surface)
-                && spec.matches(i)
+                && crate::page::genre_ok_with(Some(spec), profiles, i)
+                && crate::page::audience_fits_with(Some(spec), maturity, profiles, i)
+                && maturity.map_or(true, |m| crate::page::maturity_allows_with(m, profiles, i))
                 && crate::page::passes_member_quality(i)
                 && crate::page::meets_vote_floor(i, true)
         })
@@ -64,18 +66,18 @@ fn genre_row_cap(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &cra
 }
 
 /// The pool size only changes when the catalog reloads, so it is cached per surface, genre rule and catalog size.
-fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, surface: &str, spec: &crate::genre_spec::GenreSpec) -> usize {
+fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, spec: &crate::genre_spec::GenreSpec, maturity: Option<crate::identity::Maturity>) -> usize {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
     static CAPS: OnceLock<Mutex<std::collections::HashMap<String, (usize, Instant)>>> = OnceLock::new();
-    let key = format!("{surface}|{spec:?}|{}", catalog.len());
+    let key = format!("{surface}|{spec:?}|{}|{}|{}", catalog.len(), profiles.profiles.len(), maturity.map_or("-", |m| m.as_str()));
     let map = CAPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     if let Some((v, at)) = map.lock().unwrap().get(&key) {
         if at.elapsed() < Duration::from_secs(600) {
             return *v;
         }
     }
-    let v = genre_row_cap(catalog, surface, spec);
+    let v = genre_row_cap(catalog, profiles, surface, spec, maturity);
     map.lock().unwrap().insert(key, (v, Instant::now()));
     v
 }
@@ -195,7 +197,7 @@ pub async fn feed(
     let catalog = state.catalog.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
     let cap = match &genre_spec {
-        Some(spec) => genre_row_cap_cached(&catalog, surface, spec),
+        Some(spec) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
         None => NETFLIX_ROWS_CAP,
     };
     let target_rows = (offset + per_page).min(cap.max(MIN_ROWS_FLOOR)).max(MIN_ROWS_FLOOR);

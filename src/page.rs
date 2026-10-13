@@ -229,6 +229,53 @@ pub struct PageContext<'a> {
     pub maturity:    Option<crate::identity::Maturity>,
 }
 
+/// The page's genre rule. The Pride page trusts the model's profile when the title has one: LGBTQ+ must be central to the story (measured
+/// 51 of 53 correct on titles graded by hand, against 18 of 50 for "present"); a title without a profile keeps the keyword rule.
+pub fn genre_ok_with(spec: Option<&crate::genre_spec::GenreSpec>, profiles: &crate::profiles::ProfileStore, item: &CatalogItem) -> bool {
+    let Some(spec) = spec else { return true };
+    if matches!(spec, crate::genre_spec::GenreSpec::Lgbtq) {
+        if let Some(p) = profiles.get(item.id) {
+            return p.lgbtq == crate::profiles::Lgbtq::Central;
+        }
+    }
+    spec.matches(item)
+}
+
+/// May this tier see the title? A real certificate decides (see `Maturity::allows`). A title with no certificate but a profile is judged by
+/// the profile (strict rule for children, no sexual content for teenagers); without either the older genre and keyword rules apply.
+pub fn maturity_allows_with(m: crate::identity::Maturity, profiles: &crate::profiles::ProfileStore, item: &CatalogItem) -> bool {
+    use crate::identity::Maturity;
+    if item.cert == 0 && !matches!(m, Maturity::Adult) {
+        if let Some(p) = profiles.get(item.id) {
+            if item.adult || item.flags & crate::catalog::FLAG_SUGGESTIVE != 0 {
+                return false;
+            }
+            return match m {
+                Maturity::LittleKids | Maturity::OlderKids => p.suits_children(),
+                Maturity::Twelve => p.suits_teens(),
+                _ => !p.content.iter().any(|c| matches!(c.as_str(), "sex" | "nudity")),
+            };
+        }
+    }
+    m.allows(item)
+}
+
+/// A page of an adult genre (Action, Thriller, Pride...) does not carry children's titles for an adult or an anonymous caller. Kids profiles are
+/// limited by their maturity instead, and pages about kids, family, animation or anime keep them.
+pub fn audience_fits_with(spec: Option<&crate::genre_spec::GenreSpec>, maturity: Option<crate::identity::Maturity>, profiles: &crate::profiles::ProfileStore, item: &CatalogItem) -> bool {
+    let Some(spec) = spec else { return true };
+    if spec.keeps_children() || maturity.map_or(false, |m| m.is_kids()) {
+        return true;
+    }
+    if item.cert != 0 {
+        return item.cert >= 3; // U and PG are children's and family ratings
+    }
+    if let Some(p) = profiles.get(item.id) {
+        return p.audience & (crate::profiles::TEEN | crate::profiles::ADULT) != 0;
+    }
+    !item.genres.iter().any(|g| g.eq_ignore_ascii_case("Kids") || g.eq_ignore_ascii_case("Family"))
+}
+
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
@@ -238,51 +285,16 @@ impl<'a> PageContext<'a> {
             && (!safety_nets() || self.allowed_by_nets(item))
     }
 
-    /// The page's genre rule. The Pride page trusts the model's profile when the title has one: LGBTQ+ must be central to the story (measured
-    /// 51 of 53 correct on titles graded by hand, against 18 of 50 for "present"); a title without a profile keeps the keyword rule.
     fn genre_ok(&self, item: &CatalogItem) -> bool {
-        let Some(spec) = self.genre_spec else { return true };
-        if matches!(spec, crate::genre_spec::GenreSpec::Lgbtq) {
-            if let Some(p) = self.profiles.get(item.id) {
-                return p.lgbtq == crate::profiles::Lgbtq::Central;
-            }
-        }
-        spec.matches(item)
+        genre_ok_with(self.genre_spec, self.profiles, item)
     }
 
-    /// May this tier see the title? A real certificate decides (see `Maturity::allows`). A title with no certificate but a profile is judged by
-    /// the profile (strict rule for children, no sexual content for teenagers); without either the older genre and keyword rules apply.
     fn maturity_allows(&self, m: crate::identity::Maturity, item: &CatalogItem) -> bool {
-        use crate::identity::Maturity;
-        if item.cert == 0 && !matches!(m, Maturity::Adult) {
-            if let Some(p) = self.profiles.get(item.id) {
-                if item.adult || item.flags & crate::catalog::FLAG_SUGGESTIVE != 0 {
-                    return false;
-                }
-                return match m {
-                    Maturity::LittleKids | Maturity::OlderKids => p.suits_children(),
-                    Maturity::Twelve => p.suits_teens(),
-                    _ => !p.content.iter().any(|c| matches!(c.as_str(), "sex" | "nudity")),
-                };
-            }
-        }
-        m.allows(item)
+        maturity_allows_with(m, self.profiles, item)
     }
 
-    /// A page of an adult genre (Action, Thriller, Pride...) does not carry children's titles for an adult or an anonymous
-    /// caller. Kids profiles are limited by their maturity instead, and pages about kids, family, animation or anime keep them.
     fn audience_fits(&self, item: &CatalogItem) -> bool {
-        let Some(spec) = self.genre_spec else { return true };
-        if spec.keeps_children() || self.maturity.map_or(false, |m| m.is_kids()) {
-            return true;
-        }
-        if item.cert != 0 {
-            return item.cert >= 3; // U and PG are children's and family ratings
-        }
-        if let Some(p) = self.profiles.get(item.id) {
-            return p.audience & (crate::profiles::TEEN | crate::profiles::ADULT) != 0;
-        }
-        !item.genres.iter().any(|g| g.eq_ignore_ascii_case("Kids") || g.eq_ignore_ascii_case("Family"))
+        audience_fits_with(self.genre_spec, self.maturity, self.profiles, item)
     }
 
     /// Vote count floor: a rating from a handful of votes says nothing. Known only for pulled titles (all of the
