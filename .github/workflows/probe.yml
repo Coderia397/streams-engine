@@ -1,0 +1,11 @@
+name: TMDB recommendations probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
+        run: python3 scripts/tmdb_recs_probe.py

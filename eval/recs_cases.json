@@ -1,0 +1,21 @@
+[
+ {"name": "Breaking Bad", "id": 1396, "type": "tv", "good": ["Better Call Saul", "Ozark", "Narcos", "Peaky Blinders", "The Sopranos", "The Wire", "Dexter", "El Camino", "Sons of Anarchy", "Fargo"]},
+ {"name": "Inception", "id": 27205, "type": "movie", "good": ["Interstellar", "Tenet", "Shutter Island", "The Matrix", "Memento", "The Prestige", "Looper", "Blade Runner 2049", "Arrival", "Source Code"]},
+ {"name": "Spirited Away", "id": 129, "type": "movie", "good": ["My Neighbor Totoro", "Howl's Moving Castle", "Princess Mononoke", "Kiki's Delivery Service", "Ponyo", "Castle in the Sky", "The Wind Rises", "Whisper of the Heart"]},
+ {"name": "The Office (US)", "id": 2316, "type": "tv", "good": ["Parks and Recreation", "30 Rock", "Modern Family", "Brooklyn Nine-Nine", "Community", "Superstore", "Arrested Development", "Abbott Elementary", "Scrubs", "Seinfeld"]},
+ {"name": "Toy Story", "id": 862, "type": "movie", "good": ["Toy Story 2", "Toy Story 3", "Monsters, Inc.", "Finding Nemo", "The Incredibles", "A Bug's Life", "Shrek", "Cars", "Ratatouille", "Up"]},
+ {"name": "Frozen", "id": 109445, "type": "movie", "good": ["Moana", "Tangled", "Encanto", "Frozen II", "Brave", "The Little Mermaid", "Beauty and the Beast", "Aladdin", "Cinderella", "Raya and the Last Dragon"]},
+ {"name": "Get Out", "id": 419430, "type": "movie", "good": ["Us", "Hereditary", "Nope", "A Quiet Place", "The Invisible Man", "Midsommar", "It Follows", "The Babadook", "Parasite", "Split"]},
+ {"name": "Squid Game", "id": 93405, "type": "tv", "good": ["Alice in Borderland", "Money Heist", "The Platform", "Battle Royale", "Black Mirror", "All of Us Are Dead", "Hellbound", "Parasyte", "Kingdom", "Sweet Home"]},
+ {"name": "Stranger Things", "id": 66732, "type": "tv", "good": ["Dark", "Locke & Key", "The OA", "Wednesday", "Black Mirror", "Twin Peaks", "Super 8", "It", "Gravity Falls", "Eleven"]},
+ {"name": "The Dark Knight", "id": 155, "type": "movie", "good": ["Batman Begins", "The Dark Knight Rises", "Joker", "The Batman", "Heat", "Inception", "V for Vendetta", "Man of Steel", "Watchmen", "Logan"]},
+ {"name": "Parasite", "id": 496243, "type": "movie", "good": ["Burning", "Snowpiercer", "Memories of Murder", "Oldboy", "The Handmaiden", "Decision to Leave", "Train to Busan", "Shoplifters", "Minari", "The Wailing"]},
+ {"name": "Friends", "id": 1668, "type": "tv", "good": ["How I Met Your Mother", "Seinfeld", "The Big Bang Theory", "Joey", "New Girl", "Will & Grace", "Frasier", "Cheers", "Happy Endings", "Two and a Half Men"]},
+ {"name": "Game of Thrones", "id": 1399, "type": "tv", "good": ["House of the Dragon", "Vikings", "The Witcher", "The Last Kingdom", "The Lord of the Rings: The Rings of Power", "Rome", "Spartacus", "Outlander", "Shadow and Bone", "Merlin"]},
+ {"name": "Bluey", "id": 82728, "type": "tv", "good": ["Peppa Pig", "Hey Duggee", "PAW Patrol", "Daniel Tiger", "Octonauts", "Sesame Street", "Ms. Rachel", "Blue's Clues", "Puffin Rock", "Sarah & Duck"]},
+ {"name": "The Lion King", "id": 8587, "type": "movie", "good": ["Aladdin", "Beauty and the Beast", "The Jungle Book", "Tarzan", "Hercules", "Mulan", "Pocahontas", "Bambi", "Moana", "Dumbo"]},
+ {"name": "Mad Max: Fury Road", "id": 76341, "type": "movie", "good": ["Mad Max 2", "John Wick", "Furiosa", "Dune", "Edge of Tomorrow", "Mad Max", "Waterworld", "The Road", "Death Race", "Escape from New York"]},
+ {"name": "Pride and Prejudice", "id": 4348, "type": "movie", "good": ["Sense and Sensibility", "Emma", "Little Women", "Persuasion", "Jane Eyre", "Atonement", "Becoming Jane", "Mansfield Park", "Northanger Abbey", "Wuthering Heights"]},
+ {"name": "Planet Earth", "id": 1044, "type": "tv", "good": ["Blue Planet", "Our Planet", "Frozen Planet", "Life", "Africa", "Dynasties", "Seven Worlds", "Cosmos", "Planet Earth II", "The Blue Planet"]},
+ {"name": "Interstellar", "id": 157336, "type": "movie", "good": ["Gravity", "The Martian", "Arrival", "Contact", "Ad Astra", "2001: A Space Odyssey", "Inception", "Sunshine", "Moon", "Europa Report"]}
+]
