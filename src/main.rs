@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/recommendations", get(routes::recommendations::recommendations))
         .route("/api/feedback",        post(routes::feedback::feedback))
         .route("/api/genre-support",   get(routes::genres::genre_support))
+        .route("/api/language-support", get(routes::genres::language_support))
         .route("/api/new-popular",     get(routes::new_popular::new_popular))
         .route("/api/rating",          get(routes::rating::rating))
         .route("/api/ratings",         get(routes::rating::ratings))

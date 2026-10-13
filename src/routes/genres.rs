@@ -36,3 +36,32 @@ pub async fn genre_support(
     }
     Json(json!({ "genres": out }))
 }
+
+#[derive(Deserialize)]
+pub struct LanguageSupportQuery {
+    pub surface: Option<String>,
+    /// Comma separated original language codes (at most 60)
+    pub codes: String,
+    pub rating: Option<String>,
+}
+
+/// GET /api/language-support?codes=ko,ja&rating=PG: rows a language page can fill for this profile, and whether the page is worth offering.
+pub async fn language_support(
+    State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
+    Query(q): Query<LanguageSupportQuery>,
+) -> impl IntoResponse {
+    let maturity = maturity_of(&caller).or_else(|| q.rating.as_deref().and_then(Maturity::from_rating));
+    let surface = match q.surface.as_deref() {
+        Some("tv") | Some("series") => "tv",
+        Some("movie") | Some("films") => "movie",
+        _ => "both",
+    };
+    let catalog = state.catalog.load();
+    let mut out = serde_json::Map::new();
+    for code in q.codes.split(',').map(str::trim).filter(|c| !c.is_empty() && c.len() <= 3).take(60) {
+        let cap = crate::routes::feed::language_row_cap(&catalog, &state.profiles, surface, &code.to_lowercase(), maturity);
+        out.insert(code.to_string(), json!({ "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS }));
+    }
+    Json(json!({ "languages": out }))
+}

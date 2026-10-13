@@ -25,6 +25,8 @@ pub struct FeedQuery {
     pub affinity: Option<String>,
     /// Genre name filter applied to every row
     pub genre: Option<String>,
+    /// Original language code of a language page (ko, ja, es ...); every row holds only titles in that language
+    pub language: Option<String>,
     /// Client session id (reserved for session-aware feeds)
     pub session_id: Option<String>,
     /// Number of rows to generate (default: 20)
@@ -65,6 +67,22 @@ pub fn genre_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::pro
     (pool / (ROW_TITLES * SESSION_TURNOVER)).min(NETFLIX_ROWS_CAP)
 }
 
+/// Rows a language page can support: the quality titles in that language the profile may see, 30 per row.
+pub fn language_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, language: &str, maturity: Option<crate::identity::Maturity>) -> usize {
+    let pool = catalog
+        .values()
+        .filter(|i| {
+            (surface == "both" || i.media_type == surface)
+                && crate::page::language_matches(language, &i.original_language)
+                && crate::page::audience_fits_with(None, maturity, profiles, i)
+                && maturity.map_or(true, |m| crate::page::maturity_allows_with(m, profiles, i))
+                && crate::page::passes_member_quality(i)
+                && crate::page::meets_vote_floor(i, true)
+        })
+        .count();
+    (pool / (ROW_TITLES * SESSION_TURNOVER)).min(NETFLIX_ROWS_CAP)
+}
+
 /// The pool size only changes when the catalog reloads, so it is cached per surface, genre rule and catalog size.
 fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, spec: &crate::genre_spec::GenreSpec, maturity: Option<crate::identity::Maturity>) -> usize {
     use std::sync::{Mutex, OnceLock};
@@ -78,6 +96,22 @@ fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::
         }
     }
     let v = genre_row_cap(catalog, profiles, surface, spec, maturity);
+    map.lock().unwrap().insert(key, (v, Instant::now()));
+    v
+}
+
+fn language_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, language: &str, maturity: Option<crate::identity::Maturity>) -> usize {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CAPS: OnceLock<Mutex<std::collections::HashMap<String, (usize, Instant)>>> = OnceLock::new();
+    let key = format!("{surface}|{language}|{}|{}|{}", catalog.len(), profiles.profiles.len(), maturity.map_or("-", |m| m.as_str()));
+    let map = CAPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some((v, at)) = map.lock().unwrap().get(&key) {
+        if at.elapsed() < Duration::from_secs(600) {
+            return *v;
+        }
+    }
+    let v = language_row_cap(catalog, profiles, surface, language, maturity);
     map.lock().unwrap().insert(key, (v, Instant::now()));
     v
 }
@@ -162,7 +196,8 @@ pub async fn feed(
     let surface = normalize_surface(params.surface.as_deref().unwrap_or("both"));
     let taste_str = params.taste.as_deref().or(params.affinity.as_deref()).unwrap_or("");
     let genre = params.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());
-    let initial = if genre.is_some() { INITIAL_ROWS_GENRE } else { INITIAL_ROWS };
+    let language = params.language.as_deref().map(str::trim).filter(|l| !l.is_empty() && l.len() <= 3 && l.chars().all(|c| c.is_ascii_alphabetic())).map(str::to_lowercase);
+    let initial = if genre.is_some() || language.is_some() { INITIAL_ROWS_GENRE } else { INITIAL_ROWS };
     let per_page = params.rows.or(params.limit).unwrap_or(initial).clamp(MIN_ROWS_FLOOR, NETFLIX_ROWS_CAP);
     let offset = params.offset.unwrap_or(0).min(NETFLIX_ROWS_CAP);
 
@@ -187,7 +222,7 @@ pub async fn feed(
         key = format!("{key}|{}|v{session_version}", session_id.as_deref().unwrap_or(""));
     }
     // pages differ per maturity
-    key = format!("{key}|m:{}", maturity.map_or("-", |m| m.as_str()));
+    key = format!("{key}|m:{}|l:{}", maturity.map_or("-", |m| m.as_str()), language.as_deref().unwrap_or(""));
 
     // Check cache first
     if let Some(cached) = state.feed_cache.get(&key).await {
@@ -197,9 +232,10 @@ pub async fn feed(
     let catalog = state.catalog.load();
     let fresh = state.fresh.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
-    let cap = match &genre_spec {
-        Some(spec) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
-        None => NETFLIX_ROWS_CAP,
+    let cap = match (&genre_spec, language.as_deref()) {
+        (Some(spec), None) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
+        (_, Some(lang)) => language_row_cap_cached(&catalog, &state.profiles, surface, lang, maturity),
+        (None, None) => NETFLIX_ROWS_CAP,
     };
     let target_rows = (offset + per_page).min(cap.max(MIN_ROWS_FLOOR)).max(MIN_ROWS_FLOOR);
 
@@ -227,6 +263,7 @@ pub async fn feed(
         profiles:   &state.profiles,
         fresh:      &fresh,
         today_ymd:  crate::fresh::ymd(crate::fresh::today_days()),
+        language:   language.as_deref(),
         surface,
         genre,
         genre_spec: genre_spec.as_ref(),
@@ -245,7 +282,8 @@ pub async fn feed(
         "surface":     surface,
         "genre":       genre,
         "row_cap":     cap,
-        "genre_page_supported": genre.is_none() || cap >= MIN_GENRE_PAGE_ROWS,
+        "genre_page_supported": (genre.is_none() && language.is_none()) || cap >= MIN_GENRE_PAGE_ROWS,
+        "language":    language,
         "total_rows":  rows.len(),
         "offset":      offset,
         "next_offset": offset + rows.len(),

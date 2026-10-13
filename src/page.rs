@@ -215,6 +215,8 @@ pub struct PageContext<'a> {
     /// Release dates of new and upcoming titles, and today's date (YYYY-MM-DD) to compare them with
     pub fresh:       &'a crate::fresh::FreshStore,
     pub today_ymd:   String,
+    /// Original language code (a language page); every row holds only titles in that language
+    pub language:    Option<&'a str>,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
     /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
@@ -282,6 +284,7 @@ pub fn audience_fits_with(spec: Option<&crate::genre_spec::GenreSpec>, maturity:
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
+            && self.language.map_or(true, |l| language_matches(l, &item.original_language))
             && self.genre_ok(item)
             && self.audience_fits(item)
             && self.maturity.map_or(true, |m| self.maturity_allows(m, item))
@@ -303,7 +306,7 @@ impl<'a> PageContext<'a> {
     /// Vote count floor: a rating from a handful of votes says nothing. Known only for pulled titles (all of the
     /// quality pool); genre pages use a lower floor so small collections survive.
     fn reliable(&self, item: &CatalogItem) -> bool {
-        meets_vote_floor(item, self.genre_spec.is_some())
+        meets_vote_floor(item, self.genre_spec.is_some() || self.language.is_some())
     }
 
     /// News, talk and soap never fill default rows (a page that asks for them keeps them); seasonal titles only
@@ -390,7 +393,7 @@ impl<'a> PageContext<'a> {
         // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
         // seeds, which are mostly adult topics with a few allowed titles left in each.
         let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty();
-        if self.genre.is_some() || kids_home {
+        if self.genre.is_some() || self.language.is_some() || kids_home {
             return self.build_genre_page();
         }
         if self.taxonomy.entries.len() >= MIN_TAXONOMY_FOR_ENTRY_ROWS {
@@ -910,7 +913,7 @@ impl<'a> PageContext<'a> {
         });
         // Variety: on a page that is not about anime, Japanese language titles fill at most a third of the pool (they are many among the best
         // rated series and would otherwise fill most rows).
-        if !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime)) {
+        if !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime)) && self.language != Some("ja") {
             let mut japanese = 0usize;
             pool.retain(|i| {
                 if i.original_language == "ja" {
@@ -1459,6 +1462,11 @@ fn entry_noise(session: &str, idx: usize) -> f32 {
 }
 
 /// Vote count floor (see `PageContext::reliable`): 10 votes on default pages, 5 on genre pages.
+/// Whether a title's original language belongs to a language page: TMDB writes Chinese as `zh` or `cn` and Norwegian as `no` or `nb`.
+pub fn language_matches(page: &str, original: &str) -> bool {
+    page == original || matches!((page, original), ("zh", "cn") | ("no", "nb"))
+}
+
 /// A Top 10 needs real titles: art, a decent rating, scripted or documentary TV.
 pub fn chart_ok(item: &CatalogItem) -> bool {
     item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
