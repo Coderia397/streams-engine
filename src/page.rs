@@ -6,7 +6,7 @@ use crate::cluster::ClusterSeeds;
 use crate::hnsw::{HnswIndex, ENGINE_READY};
 use crate::mmr::{filter_outliers, greedy_mmr, mean_pairwise_cosine};
 use crate::mood::MoodVault;
-use crate::quality::{bayesian_quality_score, rerank_score};
+use crate::quality::rerank_score;
 use crate::taxonomy::TaxonomyStore;
 use crate::titles::{byw_title, clamp_words, derive_title};
 use crate::vectors::{cosine_sim, l2_normalize, sphere_mean, VectorStore, DIMS};
@@ -671,7 +671,7 @@ impl<'a> PageContext<'a> {
         // 2. Retrieve titles per shortlisted entry in parallel
         struct Cand { idx: usize, exploit: f32, explore: f32, hits: Vec<u32> }
         let guard = self.hnsw.read().await;
-        let mut cands: Vec<Cand> = pick_idx
+        let cands: Vec<Cand> = pick_idx
             .par_iter()
             .filter_map(|&idx| {
                 let e = &self.taxonomy.entries[idx];
@@ -997,7 +997,7 @@ impl<'a> PageContext<'a> {
             placed.push(c);
         }
 
-        let genre = self.genre.unwrap_or("").to_string();
+        let _genre = self.genre.unwrap_or("").to_string();
         for (ri, &c) in placed.iter().enumerate() {
             let row_idx = first_thematic + ri;
             if row_idx >= rows.len() {

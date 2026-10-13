@@ -107,7 +107,7 @@ impl ClusterSeeds {
         n_select: usize,
         max_inter_sim: f32,
         blocked_genres: &[&str],
-        vectors: &VectorStore,
+        _vectors: &VectorStore,
     ) -> Vec<&ClusterSeed> {
         let mut selected: Vec<&ClusterSeed> = Vec::new();
         let mut selected_centroids: Vec<&Vec<f32>> = Vec::new();
