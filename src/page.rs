@@ -384,7 +384,10 @@ impl<'a> PageContext<'a> {
     }
 
     async fn build_page_rows(&self) -> Vec<Row> {
-        if self.genre.is_some() {
+        // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
+        // seeds, which are mostly adult topics with a few allowed titles left in each.
+        let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty();
+        if self.genre.is_some() || kids_home {
             return self.build_genre_page();
         }
         if self.taxonomy.entries.len() >= MIN_TAXONOMY_FOR_ENTRY_ROWS {
@@ -627,6 +630,7 @@ impl<'a> PageContext<'a> {
             let mut candidates = if has_taxonomy && !derived.is_empty() { vec![derived.remove(0)] } else { Vec::new() };
             candidates.extend(crate::row_label::candidates(&row_catalog));
             candidates.extend(derived);
+            let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 4);
         }
@@ -1115,6 +1119,7 @@ impl<'a> PageContext<'a> {
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
                 None, self.mood_vault,
             ));
+            let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 4);
         }

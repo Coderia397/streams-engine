@@ -216,6 +216,15 @@ pub fn primary_country(it: &CatalogItem) -> Option<&str> {
 
 /// "found family" with a row of mostly dramas becomes "Found Family Dramas"; with no genre noun, "Found Family Stories". None for a theme that is
 /// empty, longer than three words, or too generic to name a row alone.
+/// A theme in front of a genre noun, unless the two repeat a word ("Found Family Family Favorites").
+fn themed(theme: &str, noun: &str) -> Option<String> {
+    let first = noun.split_whitespace().next().unwrap_or("");
+    if theme.split_whitespace().any(|w| w.eq_ignore_ascii_case(first)) {
+        return None;
+    }
+    Some(format!("{theme} {noun}"))
+}
+
 pub fn theme_title(theme: &str, items: &[&CatalogItem]) -> Option<String> {
     let words: Vec<&str> = theme.split_whitespace().collect();
     if words.is_empty() || words.len() > 3 || matches!(theme, "entertainment" | "comedy" | "drama" | "humor" | "action" | "family") {
@@ -238,10 +247,25 @@ pub fn theme_title(theme: &str, items: &[&CatalogItem]) -> Option<String> {
     if words.len() == 1 {
         return Some(format!("Stories of {title_case}"));
     }
-    Some(format!("{title_case} {}", top.unwrap_or("Stories")))
+    themed(&title_case, top.unwrap_or("Stories"))
 }
 
 /// Title candidates for a row, most specific first. Empty when nothing specific can be said.
+/// A row that is mostly animated titles says so in every name it could take ("Animated Comedies", not "Comedies"). Anime rows already name
+/// themselves, and a name that already mentions animation is left alone.
+pub fn mark_animated(names: Vec<String>, items: &[&CatalogItem]) -> Vec<String> {
+    let n = items.len();
+    let animated = items.iter().filter(|i| !i.is_anime && i.genres.iter().any(|g| g == "Animation")).count();
+    let anime = items.iter().filter(|i| i.is_anime).count();
+    if n < 4 || animated * 10 < n * 7 || anime * 10 >= n * 6 {
+        return names;
+    }
+    names
+        .into_iter()
+        .map(|s| if s.contains("Animat") || s.contains("Anime") || s.contains("Cartoon") { s } else { format!("Animated {s}") })
+        .collect()
+}
+
 pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let n = items.len();
     if n < 4 {
@@ -343,7 +367,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
             push(format!("{name} Anime"));
         }
         for t in themes.iter().filter(|t| !t.1) {
-            if let Some(g) = gnoun { push(format!("{} {}", t.0, g)); }
+            if let Some(g) = gnoun { if let Some(s) = themed(t.0, g) { push(s); } }
         }
         push("Anime Favorites".to_string());
     }
@@ -355,10 +379,10 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     }
     let is_city = |p: &str| matches!(p, "Paris" | "London" | "Tokyo" | "New York" | "Los Angeles");
     if let (Some(c), Some(t)) = (country_adj, themes.iter().find(|t| !t.1 && !is_city(t.0))) {
-        if let Some(g) = theme_noun { push(format!("{c} {} {g}", t.0)); }
+        if let Some(g) = theme_noun { if let Some(s) = themed(t.0, g) { push(format!("{c} {s}")); } }
     }
     for t in themes.iter().filter(|t| !t.1) {
-        if let Some(g) = theme_noun { push(format!("{} {}", t.0, g)); }
+        if let Some(g) = theme_noun { if let Some(s) = themed(t.0, g) { push(s); } }
     }
     for t in themes.iter().filter(|t| t.1) {
         push(match country_adj { Some(c) if !t.0.starts_with(c) => format!("{c} {}", t.0), _ => t.0.to_string() });
@@ -448,5 +472,16 @@ mod tests {
         assert!(c.iter().any(|t| t == "Animation Anime" || t == "Romance Anime"), "{c:?}");
         assert!(!c.iter().any(|t| t.starts_with("90s") || t.starts_with("2000s") || t.starts_with("2010s")), "{c:?}");
         assert!(candidates(&refs[..3]).is_empty());
+    }
+
+    #[test]
+    fn animated_rows_say_so() {
+        let items: Vec<CatalogItem> = (0..10).map(|i| item(&["Animation", "Comedy"], &["US"], &[], 2010 + i)).collect();
+        let refs: Vec<&CatalogItem> = items.iter().collect();
+        let marked = mark_animated(vec!["Comedies".to_string(), "Animation Picks".to_string()], &refs);
+        assert_eq!(marked, vec!["Animated Comedies".to_string(), "Animation Picks".to_string()]);
+        let live: Vec<CatalogItem> = (0..10).map(|i| item(&["Comedy"], &["US"], &[], 2010 + i)).collect();
+        let live_refs: Vec<&CatalogItem> = live.iter().collect();
+        assert_eq!(mark_animated(vec!["Comedies".to_string()], &live_refs), vec!["Comedies".to_string()]);
     }
 }
