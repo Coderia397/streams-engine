@@ -261,7 +261,7 @@ pub async fn new_popular(
                     "items": items.iter().enumerate().map(|(i, c)| item_json(c, ranked.then_some(i + 1), today_n)).collect::<Vec<_>>(),
                 })]
             };
-            json!({ "tab": t, "generated": fresh.generated, "total_rows": rows.len(), "rows": rows })
+            json!({ "surface": "new_popular", "tab": t, "generated": fresh.generated, "total_rows": rows.len(), "rows": rows })
         }
         None => {
             let rows = desktop_rows(&catalog, &fresh, &pool, maturity, &state.profiles, &today, today_n, year, limit);
