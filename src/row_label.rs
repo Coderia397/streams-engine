@@ -250,6 +250,34 @@ pub fn theme_title(theme: &str, items: &[&CatalogItem]) -> Option<String> {
     themed(&title_case, top.unwrap_or("Stories"))
 }
 
+/// A row with no keyword or theme name can still be named by the tone that sets it apart ("Dark Crime Stories"). The tone and the genre
+/// noun must not say the same thing ("Suspenseful Thrillers", "Romantic Romances").
+pub fn tone_title(tone: &str, items: &[&CatalogItem]) -> Option<String> {
+    let n = items.len();
+    if n < 4 {
+        return None;
+    }
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for it in items {
+        let mut seen: Vec<&str> = Vec::new();
+        for g in &it.genres {
+            let k = genre_key(g);
+            if !seen.contains(&k) {
+                seen.push(k);
+                *count.entry(k).or_insert(0) += 1;
+            }
+        }
+    }
+    let top = count.into_iter().filter(|(g, c)| noun(g).is_some() && *c * 2 >= n).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).and_then(|(g, _)| noun(g))?;
+    let lower = top.to_lowercase();
+    let stem: String = tone.to_lowercase().chars().take(5).collect();
+    let same = lower.contains(&stem) || matches!((tone, top), ("Suspenseful", "Thrillers") | ("Mysterious", "Mysteries") | ("Action-Packed", "Action") | ("Satirical", "Comedies") | ("Absurd", "Comedies") | ("Feel-Good", "Family Favorites"));
+    if same {
+        return None;
+    }
+    themed(tone, top)
+}
+
 /// Title candidates for a row, most specific first. Empty when nothing specific can be said.
 /// A row that is mostly animated titles says so in every name it could take ("Animated Comedies", not "Comedies"). Anime rows already name
 /// themselves, and a name that already mentions animation is left alone.
@@ -483,5 +511,15 @@ mod tests {
         let live: Vec<CatalogItem> = (0..10).map(|i| item(&["Comedy"], &["US"], &[], 2010 + i)).collect();
         let live_refs: Vec<&CatalogItem> = live.iter().collect();
         assert_eq!(mark_animated(vec!["Comedies".to_string()], &live_refs), vec!["Comedies".to_string()]);
+    }
+
+    #[test]
+    fn tone_names_skip_repeats() {
+        let items: Vec<CatalogItem> = (0..8).map(|i| item(&["Crime", "Drama"], &["US"], &[], 2000 + i)).collect();
+        let refs: Vec<&CatalogItem> = items.iter().collect();
+        assert_eq!(tone_title("Dark", &refs), Some("Dark Crime Stories".to_string()));
+        let thr: Vec<CatalogItem> = (0..8).map(|i| item(&["Thriller"], &["US"], &[], 2000 + i)).collect();
+        let thr_refs: Vec<&CatalogItem> = thr.iter().collect();
+        assert_eq!(tone_title("Suspenseful", &thr_refs), None);
     }
 }

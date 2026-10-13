@@ -111,11 +111,85 @@ pub struct ProfileStore {
     pub profiles: Vec<TitleProfile>,
     /// float16 bits, `DIMS` per profile; empty when the vectors file is missing
     pub vectors: Vec<u16>,
+    /// share of all profiles carrying each row-name tone (by display name); the baseline a row's tone is compared against
+    pub tone_share: HashMap<&'static str, f32>,
+    /// share of all profiles carrying each theme phrase
+    pub theme_share: HashMap<String, f32>,
+}
+
+/// Tone words (as the model writes them) that make a good row name, with the word shown. Several spellings share one display name.
+const TONE_NAMES: &[(&str, &str)] = &[
+    ("dark", "Dark"), ("gritty", "Gritty"), ("heartwarming", "Heartwarming"), ("heartfelt", "Heartwarming"),
+    ("lighthearted", "Feel-Good"), ("light-hearted", "Feel-Good"), ("whimsical", "Whimsical"), ("quirky", "Quirky"),
+    ("nostalgic", "Nostalgic"), ("epic", "Epic"), ("uplifting", "Uplifting"), ("inspirational", "Inspiring"), ("inspiring", "Inspiring"),
+    ("satirical", "Satirical"), ("absurd", "Absurd"), ("absurdist", "Absurd"), ("unsettling", "Unsettling"), ("romantic", "Romantic"),
+    ("gentle", "Gentle"), ("playful", "Playful"), ("mysterious", "Mysterious"), ("melancholic", "Melancholy"),
+    ("action-packed", "Action-Packed"), ("suspenseful", "Suspenseful"), ("tense", "Suspenseful"), ("sarcastic", "Sarcastic"),
+];
+
+fn tone_display(word: &str) -> Option<&'static str> {
+    TONE_NAMES.iter().find(|(w, _)| *w == word).map(|(_, d)| *d)
 }
 
 impl ProfileStore {
     pub fn empty() -> Self {
-        Self { index: HashMap::new(), profiles: Vec::new(), vectors: Vec::new() }
+        Self { index: HashMap::new(), profiles: Vec::new(), vectors: Vec::new(), tone_share: HashMap::new(), theme_share: HashMap::new() }
+    }
+
+    /// The theme that sets a row apart: carried by at least `min_share` of the row's titles and at least `min_lift` times more often than across
+    /// all profiles. A theme every kind of title shares ("entertainment") never qualifies. Ties go to the larger lift, then the name.
+    pub fn row_theme_lift(&self, profiles: &[&TitleProfile], min_share: f32, min_lift: f32) -> Option<(String, f32)> {
+        if profiles.is_empty() {
+            return None;
+        }
+        let mut count: HashMap<&str, usize> = HashMap::new();
+        for p in profiles {
+            let mut seen: Vec<&str> = Vec::new();
+            for t in &p.themes {
+                if !seen.contains(&t.as_str()) {
+                    seen.push(t);
+                    *count.entry(t).or_insert(0) += 1;
+                }
+            }
+        }
+        count
+            .into_iter()
+            .filter_map(|(th, n)| {
+                let share = n as f32 / profiles.len() as f32;
+                let base = self.theme_share.get(th).copied().unwrap_or(0.0).max(1.0 / (self.profiles.len().max(1) as f32));
+                (share >= min_share && share / base >= min_lift).then(|| (th.to_string(), share, share / base))
+            })
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0)))
+            .map(|(th, share, _)| (th, share))
+    }
+
+    /// The tone that sets a row apart: the display tone carried by at least `min_share` of the row's titles and at least `min_lift` times
+    /// more often than across all profiles. None when no tone stands out (common tones such as "dramatic" never qualify).
+    pub fn row_tone(&self, profiles: &[&TitleProfile], min_share: f32, min_lift: f32) -> Option<&'static str> {
+        if profiles.is_empty() {
+            return None;
+        }
+        let mut count: HashMap<&'static str, usize> = HashMap::new();
+        for p in profiles {
+            let mut seen: Vec<&'static str> = Vec::new();
+            for w in &p.tone {
+                if let Some(d) = tone_display(w) {
+                    if !seen.contains(&d) {
+                        seen.push(d);
+                        *count.entry(d).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        count
+            .into_iter()
+            .filter_map(|(d, n)| {
+                let share = n as f32 / profiles.len() as f32;
+                let base = self.tone_share.get(d).copied().unwrap_or(0.0).max(0.005);
+                (share >= min_share && share / base >= min_lift).then_some((d, share / base))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(a.0)))
+            .map(|(d, _)| d)
     }
 
     pub fn get(&self, key: u32) -> Option<&TitleProfile> {
@@ -149,6 +223,31 @@ impl ProfileStore {
             vectors.extend((0..DIMS).map(|d| u16::from_le_bytes([bytes[(pos * DIMS + d) * 2], bytes[(pos * DIMS + d) * 2 + 1]])));
         }
         store.vectors = vectors;
+        let mut tone_count: HashMap<&'static str, usize> = HashMap::new();
+        for p in &store.profiles {
+            let mut seen: Vec<&'static str> = Vec::new();
+            for w in &p.tone {
+                if let Some(d) = tone_display(w) {
+                    if !seen.contains(&d) {
+                        seen.push(d);
+                        *tone_count.entry(d).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let total = store.profiles.len().max(1) as f32;
+        let mut theme_count: HashMap<String, usize> = HashMap::new();
+        for p in &store.profiles {
+            let mut seen: Vec<&str> = Vec::new();
+            for th in &p.themes {
+                if !seen.contains(&th.as_str()) {
+                    seen.push(th);
+                    *theme_count.entry(th.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+        store.theme_share = theme_count.into_iter().map(|(th, n)| (th, n as f32 / total)).collect();
+        store.tone_share = tone_count.into_iter().map(|(d, n)| (d, n as f32 / total)).collect();
         store
     }
 }
@@ -232,5 +331,23 @@ mod tests {
     fn missing_files_give_an_empty_store() {
         let s = ProfileStore::load("/definitely/not/here");
         assert!(s.profiles.is_empty() && s.vector(1).is_none());
+    }
+
+    #[test]
+    fn a_tone_must_stand_out_to_name_a_row() {
+        let mk = |tone: &[&str]| parse_profile(&json!({"audience": "adult", "tone": tone})).unwrap();
+        let mut store = ProfileStore::empty();
+        store.tone_share.insert("Dark", 0.13);
+        store.tone_share.insert("Feel-Good", 0.13);
+        let dark: Vec<TitleProfile> = (0..10).map(|_| mk(&["dark", "dramatic"])).collect();
+        let refs: Vec<&TitleProfile> = dark.iter().collect();
+        assert_eq!(store.row_tone(&refs, 0.35, 2.5), Some("Dark"));
+        // a tone every title carries is not distinctive
+        store.tone_share.insert("Dark", 0.9);
+        assert_eq!(store.row_tone(&refs, 0.35, 2.5), None);
+        // "dramatic" is not a naming tone
+        let plain: Vec<TitleProfile> = (0..10).map(|_| mk(&["dramatic"])).collect();
+        let plain_refs: Vec<&TitleProfile> = plain.iter().collect();
+        assert_eq!(store.row_tone(&plain_refs, 0.35, 2.5), None);
     }
 }

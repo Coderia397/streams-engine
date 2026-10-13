@@ -1110,8 +1110,11 @@ impl<'a> PageContext<'a> {
             let mut candidates = crate::row_label::candidates(&row_catalog);
             let row_profiles: Vec<&crate::profiles::TitleProfile> = rows[row_idx].items.iter().filter_map(|i| self.profiles.get(i.id)).collect();
             if row_profiles.len() * 2 >= rows[row_idx].items.len() {
-                if let Some((theme, _)) = crate::profiles::row_theme(&row_profiles, 0.5) {
+                if let Some((theme, _)) = crate::profiles::row_theme(&row_profiles, 0.5).or_else(|| self.profiles.row_theme_lift(&row_profiles, 0.3, 8.0)) {
                     candidates.extend(crate::row_label::theme_title(&theme, &row_catalog));
+                }
+                if let Some(tone) = self.profiles.row_tone(&row_profiles, 0.35, 2.5) {
+                    candidates.extend(crate::row_label::tone_title(tone, &row_catalog));
                 }
             }
             candidates.extend(derive_title(
