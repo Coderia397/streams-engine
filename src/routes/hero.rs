@@ -68,6 +68,7 @@ fn hero_item_json(item: &CatalogItem) -> Value {
         "poster_path":   item.poster_path,
         "backdrop_path": item.backdrop_path,
         "vote_average":  item.vote_average,
+        "rating":        crate::catalog::cert_label(item.cert),
     })
 }
 

@@ -159,6 +159,18 @@ fn json_list(raw: Option<String>, lower: bool) -> Vec<String> {
 
 /// Load the entire catalog from SQLite into a HashMap keyed by `item_key` (type aware).
 /// This is the ONLY place SQLite is accessed — never on the request hot path.
+/// The label a client shows for a certificate rank: the British rating, or NR (not rated) when there is none.
+pub fn cert_label(cert: u8) -> &'static str {
+    match cert {
+        1 => "U",
+        2 => "PG",
+        3 => "12",
+        4 => "15",
+        5 => "18",
+        _ => "NR",
+    }
+}
+
 /// British age rank from the certificates column (a JSON object of country to certificate). The GB certificate wins; otherwise the US one is
 /// mapped to the nearest British rating. 0 when there is none or it is not a rating (for example "NR").
 pub fn cert_rank(certs: Option<&str>) -> u8 {

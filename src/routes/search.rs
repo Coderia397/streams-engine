@@ -60,7 +60,7 @@ pub async fn search(
             items.iter().map(|item| json!({
                 "id": item.tmdb_id, "title": item.title, "media_type": item.media_type,
                 "poster_path": item.poster_path, "vote_average": item.vote_average,
-                "genres": item.genres, "release_year": item.release_year,
+                "genres": item.genres, "release_year": item.release_year, "rating": crate::catalog::cert_label(item.cert),
             })).collect()
         }
     };

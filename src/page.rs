@@ -172,6 +172,8 @@ pub struct RowItem {
     /// TMDB tv type (Scripted, Reality, Talk Show, ...) and original language, for clients and checks
     pub tv_type:      Option<String>,
     pub language:     String,
+    /// British age rank of the title (0 unknown), see `catalog::cert_rank`
+    pub cert:         u8,
 }
 
 impl RowItem {
@@ -190,6 +192,7 @@ impl RowItem {
             genres:        item.genres.clone(),
             tv_type:       item.tv_type.clone(),
             language:      item.original_language.clone(),
+            cert:          item.cert,
         }
     }
 }

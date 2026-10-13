@@ -47,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/search",          get(routes::search::search))
         .route("/api/recommendations", get(routes::recommendations::recommendations))
         .route("/api/feedback",        post(routes::feedback::feedback))
+        .route("/api/rating",          get(routes::rating::rating))
+        .route("/api/ratings",         get(routes::rating::ratings))
         .route("/api/health",          get(routes::health::health))
         .layer(CorsLayer::permissive())
         .with_state(state);
