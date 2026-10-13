@@ -273,7 +273,7 @@ mod tests {
             id: 1, tmdb_id: 1, media_type: mt.to_string(), title: "t".into(), release_year: Some(2000), genres: vec![],
             overview: String::new(), tagline: None, director: None, poster_path: None, backdrop_path: None,
             vote_average: 7.5, popularity: 10.0, is_anime: false, vote_count: 0, adult: false,
-            original_language: "en".into(), tv_type: None, countries: vec![], keywords: vec![], runtime: 0, flags: 0,
+            original_language: "en".into(), tv_type: None, countries: vec![], keywords: vec![], runtime: 0, flags: 0, cert: 0,
         }
     }
 

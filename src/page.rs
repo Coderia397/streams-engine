@@ -234,8 +234,11 @@ impl<'a> PageContext<'a> {
     /// caller. Kids profiles are limited by their maturity instead, and pages about kids, family, animation or anime keep them.
     fn audience_fits(&self, item: &CatalogItem) -> bool {
         let Some(spec) = self.genre_spec else { return true };
-        if spec.keeps_children() || self.maturity.map_or(false, |m| !matches!(m, crate::identity::Maturity::Adult)) {
+        if spec.keeps_children() || self.maturity.map_or(false, |m| m.is_kids()) {
             return true;
+        }
+        if item.cert != 0 {
+            return item.cert >= 3; // U and PG are children's and family ratings
         }
         !item.genres.iter().any(|g| g.eq_ignore_ascii_case("Kids") || g.eq_ignore_ascii_case("Family"))
     }

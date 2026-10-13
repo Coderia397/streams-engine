@@ -22,6 +22,8 @@ const EXCLUDED_GENRES: [&str; 5] = ["News", "Talk", "Soap", "Reality", "Document
 
 #[derive(Deserialize)]
 pub struct HeroQuery {
+    /// Age rating limit of a local profile (U, PG, 12, 15 or 18). Used only when no verified profile is sent; a verified profile's own setting wins.
+    pub rating: Option<String>,
     /// home | films | movies | series | tv
     #[serde(default = "default_surface")]
     pub surface: String,
@@ -78,7 +80,7 @@ pub async fn hero_feed(
     MaybeCaller(caller): MaybeCaller,
     Query(q): Query<HeroQuery>,
 ) -> impl IntoResponse {
-    let maturity = maturity_of(&caller);
+    let maturity = maturity_of(&caller).or_else(|| q.rating.as_deref().and_then(crate::identity::Maturity::from_rating));
     let surface = q.surface.to_lowercase();
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty()).map(str::to_lowercase);
     // The client sends a genre id or name; both resolve through genre_spec for this surface

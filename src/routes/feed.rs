@@ -15,6 +15,8 @@ use std::sync::Arc;
 /// Query parameters for GET /api/feed
 #[derive(Deserialize, Debug)]
 pub struct FeedQuery {
+    /// Age rating limit of a local profile (U, PG, 12, 15 or 18). Used only when no verified profile is sent; a verified profile's own setting wins.
+    pub rating: Option<String>,
     /// "movie", "tv", "both", or the client surfaces "home", "films", "series"
     pub surface: Option<String>,
     /// Sparse taste vector: "28:0.45,80:0.31,878:0.15" (genre_id:weight pairs)
@@ -154,7 +156,7 @@ pub async fn feed(
 ) -> impl IntoResponse {
     // A verified caller's session is its profile (or user) id, whatever the query says
     let session_id: Option<String> = caller.as_ref().map(|c| c.session_key()).or_else(|| params.session_id.clone());
-    let maturity = maturity_of(&caller);
+    let maturity = maturity_of(&caller).or_else(|| params.rating.as_deref().and_then(crate::identity::Maturity::from_rating));
     let surface = normalize_surface(params.surface.as_deref().unwrap_or("both"));
     let taste_str = params.taste.as_deref().or(params.affinity.as_deref()).unwrap_or("");
     let genre = params.genre.as_deref().map(str::trim).filter(|g| !g.is_empty());

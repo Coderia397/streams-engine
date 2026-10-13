@@ -12,6 +12,8 @@ use crate::identity::{maturity_of, MaybeCaller, Maturity};
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
+    /// Age rating limit of a local profile (U, PG, 12, 15 or 18). Used only when no verified profile is sent; a verified profile's own setting wins.
+    pub rating: Option<String>,
     pub q: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -26,7 +28,7 @@ pub async fn search(
     MaybeCaller(caller): MaybeCaller,
     Query(params): Query<SearchQuery>,
 ) -> impl IntoResponse {
-    let maturity = maturity_of(&caller);
+    let maturity = maturity_of(&caller).or_else(|| params.rating.as_deref().and_then(crate::identity::Maturity::from_rating));
     let q = params.q.trim().to_string();
     let wanted = params.limit.clamp(1, 100);
     // a restricted profile loses some matches to the filter, so fetch more and trim after

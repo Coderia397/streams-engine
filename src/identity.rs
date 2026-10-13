@@ -36,7 +36,8 @@ use crate::app::AppState;
 pub enum Maturity {
     LittleKids,
     OlderKids,
-    Teens,
+    Twelve,
+    Fifteen,
     Adult,
 }
 
@@ -56,17 +57,47 @@ impl Maturity {
         match s {
             "little_kids" => Some(Self::LittleKids),
             "older_kids" => Some(Self::OlderKids),
-            "teens" => Some(Self::Teens),
+            "teens" | "twelve" => Some(Self::Twelve),
+            "fifteen" => Some(Self::Fifteen),
             "adult" => Some(Self::Adult),
             _ => None,
         }
+    }
+
+    /// From a British age rating as the profile setting saves it: U, PG, 12, 15 or 18.
+    pub fn from_rating(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "U" => Some(Self::LittleKids),
+            "PG" => Some(Self::OlderKids),
+            "12" | "12A" => Some(Self::Twelve),
+            "15" => Some(Self::Fifteen),
+            "18" => Some(Self::Adult),
+            _ => None,
+        }
+    }
+
+    /// The highest certificate rank this tier may see (1 U, 2 PG, 3 12, 4 15, 5 18).
+    pub fn max_cert(self) -> u8 {
+        match self {
+            Self::LittleKids => 1,
+            Self::OlderKids => 2,
+            Self::Twelve => 3,
+            Self::Fifteen => 4,
+            Self::Adult => 5,
+        }
+    }
+
+    /// Kids tiers (U and PG) are the ones for children's profiles.
+    pub fn is_kids(self) -> bool {
+        matches!(self, Self::LittleKids | Self::OlderKids)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LittleKids => "little_kids",
             Self::OlderKids => "older_kids",
-            Self::Teens => "teens",
+            Self::Twelve => "twelve",
+            Self::Fifteen => "fifteen",
             Self::Adult => "adult",
         }
     }
@@ -83,7 +114,11 @@ impl Maturity {
         if item.adult || item.flags & FLAG_SUGGESTIVE != 0 {
             return false;
         }
-        if self == Self::Teens {
+        // a known age rating decides (U for little kids, up to PG for older kids, 12, up to 15)
+        if item.cert != 0 {
+            return item.cert <= self.max_cert();
+        }
+        if matches!(self, Self::Twelve | Self::Fifteen) {
             return true;
         }
         let has = |name: &str| item.genres.iter().any(|g| g.eq_ignore_ascii_case(name));
@@ -295,7 +330,7 @@ impl Identity {
         if let Some(hit) = self.profiles.get(&key).await {
             return Ok(hit);
         }
-        let url = format!("{}/rest/v1/profiles?id=eq.{profile_id}&select=id,kind,maturity", self.supabase_url);
+        let url = format!("{}/rest/v1/profiles?id=eq.{profile_id}&select=id,kind,maturity,profile_settings(age_rating)", self.supabase_url);
         let rows: Vec<Value> = self
             .http
             .get(&url)
@@ -316,14 +351,18 @@ impl Identity {
 }
 
 fn profile_from_row(row: &Value) -> Option<ProfileInfo> {
-    let maturity = Maturity::parse(row.get("maturity")?.as_str()?)?;
-    // a kids profile can never be adult (the database enforces it too); belt and braces
+    let base = Maturity::parse(row.get("maturity")?.as_str()?)?;
+    // the profile's own age rating (profile_settings.age_rating, the British rating the owner set) wins; the old maturity is the fallback
+    let rating = row
+        .get("profile_settings")
+        .and_then(|s| if s.is_array() { s.get(0) } else { Some(s) })
+        .and_then(|s| s.get("age_rating"))
+        .and_then(Value::as_str)
+        .and_then(Maturity::from_rating);
+    let maturity = rating.unwrap_or(base);
+    // a kids profile can never be above PG (the database enforces it too); belt and braces
     let kind = row.get("kind").and_then(Value::as_str).unwrap_or("adult");
-    let maturity = if kind == "kids" && !matches!(maturity, Maturity::LittleKids | Maturity::OlderKids) {
-        Maturity::OlderKids
-    } else {
-        maturity
-    };
+    let maturity = if kind == "kids" && !maturity.is_kids() { Maturity::OlderKids } else { maturity };
     Some(ProfileInfo { maturity })
 }
 
@@ -560,6 +599,22 @@ mod tests {
         assert!(n >= 1);
     }
 
+    fn rated(cert: u8) -> CatalogItem {
+        let mut it = item(&["Drama"], &[], false, 0);
+        it.cert = cert;
+        it
+    }
+
+    #[test]
+    fn a_known_age_rating_decides_what_each_tier_sees() {
+        // little kids see U only, older kids up to PG, teens up to 15, adults everything
+        assert!(Maturity::LittleKids.allows(&rated(1)) && !Maturity::LittleKids.allows(&rated(2)));
+        assert!(Maturity::OlderKids.allows(&rated(2)) && !Maturity::OlderKids.allows(&rated(3)));
+        assert!(Maturity::Twelve.allows(&rated(3)) && !Maturity::Twelve.allows(&rated(4)));
+        assert!(Maturity::Fifteen.allows(&rated(4)) && !Maturity::Fifteen.allows(&rated(5)));
+        assert!(Maturity::Adult.allows(&rated(5)));
+    }
+
     fn item(genres: &[&str], keywords: &[&str], adult: bool, flags: u8) -> CatalogItem {
         CatalogItem {
             id: 1,
@@ -584,6 +639,7 @@ mod tests {
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
             runtime: 0,
             flags,
+            cert: 0,
         }
     }
 
@@ -598,7 +654,7 @@ mod tests {
         let adult_flag = item(&["Drama"], &[], true, 0);
         let suggestive = item(&["Animation"], &[], false, FLAG_SUGGESTIVE);
 
-        for m in [Maturity::LittleKids, Maturity::OlderKids, Maturity::Teens, Maturity::Adult] {
+        for m in [Maturity::LittleKids, Maturity::OlderKids, Maturity::Twelve, Maturity::Fifteen, Maturity::Adult] {
             assert!(m.allows(&kids_show), "{m:?} kids show");
         }
         assert!(Maturity::LittleKids.allows(&family_film));
@@ -609,8 +665,8 @@ mod tests {
             assert!(!m.allows(&violent_anime), "{m:?} violent keywords");
             assert!(!m.allows(&drama), "{m:?} plain drama");
         }
-        assert!(Maturity::Teens.allows(&drama) && Maturity::Teens.allows(&horror));
-        assert!(!Maturity::Teens.allows(&adult_flag) && !Maturity::Teens.allows(&suggestive));
+        assert!(Maturity::Fifteen.allows(&drama) && Maturity::Fifteen.allows(&horror));
+        assert!(!Maturity::Fifteen.allows(&adult_flag) && !Maturity::Fifteen.allows(&suggestive));
         assert!(Maturity::Adult.allows(&adult_flag), "adult profiles keep the existing page safety nets only");
         assert_eq!(Maturity::parse(Maturity::OlderKids.as_str()), Some(Maturity::OlderKids));
     }

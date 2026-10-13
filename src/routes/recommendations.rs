@@ -14,6 +14,8 @@ use crate::vectors::l2_normalize;
 
 #[derive(Deserialize)]
 pub struct RecsQuery {
+    /// Age rating limit of a local profile (U, PG, 12, 15 or 18). Used only when no verified profile is sent; a verified profile's own setting wins.
+    pub rating: Option<String>,
     /// TMDB item ID to base recommendations on
     pub id: u32,
     /// "movie" or "tv". TMDB ids repeat across the two, so send it; without it the movie is tried first.
@@ -42,7 +44,7 @@ pub async fn recommendations(
     MaybeCaller(caller): MaybeCaller,
     Query(params): Query<RecsQuery>,
 ) -> impl IntoResponse {
-    let maturity = maturity_of(&caller);
+    let maturity = maturity_of(&caller).or_else(|| params.rating.as_deref().and_then(crate::identity::Maturity::from_rating));
     let catalog = state.catalog.load();
 
     let Some(anchor_key) = crate::catalog::resolve_key(&catalog, params.id, params.media_type.as_deref()) else {

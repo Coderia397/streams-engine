@@ -37,6 +37,8 @@ pub struct CatalogItem {
     pub countries: Vec<String>,
     /// TMDB keywords, lower case (catalog_v2 only, pulled titles)
     pub keywords: Vec<String>,
+    /// British age rating of the title as a rank: 0 unknown, 1 U, 2 PG, 3 12, 4 15, 5 18. Taken from the GB certificate, else the US one.
+    pub cert: u8,
     /// Minutes: movie runtime or median episode runtime, 0 when unknown
     pub runtime: u32,
     /// Bit flags computed once at load (see FLAG_*), so page builders never scan titles or keywords per request
@@ -157,6 +159,32 @@ fn json_list(raw: Option<String>, lower: bool) -> Vec<String> {
 
 /// Load the entire catalog from SQLite into a HashMap keyed by `item_key` (type aware).
 /// This is the ONLY place SQLite is accessed — never on the request hot path.
+/// British age rank from the certificates column (a JSON object of country to certificate). The GB certificate wins; otherwise the US one is
+/// mapped to the nearest British rating. 0 when there is none or it is not a rating (for example "NR").
+pub fn cert_rank(certs: Option<&str>) -> u8 {
+    let Some(text) = certs else { return 0 };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return 0 };
+    let get = |c: &str| v.get(c).and_then(|x| x.as_str()).map(|s| s.trim().to_ascii_uppercase());
+    if let Some(gb) = get("GB") {
+        match gb.as_str() {
+            "U" | "UC" => return 1,
+            "PG" => return 2,
+            "12" | "12A" => return 3,
+            "15" => return 4,
+            "18" | "R18" => return 5,
+            _ => {}
+        }
+    }
+    match get("US").as_deref() {
+        Some("G") | Some("TV-G") | Some("TV-Y") => 1,
+        Some("PG") | Some("TV-PG") | Some("TV-Y7") | Some("TV-Y7-FV") => 2,
+        Some("PG-13") => 3,
+        Some("TV-14") => 4,
+        Some("R") | Some("TV-MA") | Some("NC-17") => 5,
+        _ => 0,
+    }
+}
+
 pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
     let conn = Connection::open(db_path)?;
 
@@ -173,7 +201,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         "SELECT {id_col}, media_type, title, release_year, genres,
                 overview, poster_path, backdrop_path,
                 vote_average, popularity, is_anime, tagline, director,
-                {vc}, {ad}, {ol}, {tt}, {oc}, {kw}, {rt}
+                {vc}, {ad}, {ol}, {tt}, {oc}, {kw}, {rt}, {ce}
          FROM catalog",
         vc = opt("vote_count", "0"),
         ad = opt("adult", "0"),
@@ -182,6 +210,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         oc = opt("origin_country", "NULL"),
         kw = opt("keywords", "NULL"),
         rt = opt("runtime", "0"),
+        ce = opt("certs", "NULL"),
     );
     let mut stmt = conn.prepare(&sql)?;
 
@@ -234,6 +263,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
             keywords,
             runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
+            cert:          cert_rank(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()),
             flags,
         })
     })?;
@@ -359,5 +389,32 @@ mod tests {
         let got = &map[&(1399 | TV_BIT)];
         assert_eq!((got.tmdb_id, got.media_type.as_str(), got.vote_count, got.adult), (1399, "tv", 0, false));
         assert!(map.contains_key(&550));
+    }
+}
+
+#[cfg(test)]
+mod cert_tests {
+    use super::cert_rank;
+
+    #[test]
+    fn british_certificate_wins_over_the_us_one() {
+        assert_eq!(cert_rank(Some(r#"{"GB":"15","US":"PG"}"#)), 4);
+        assert_eq!(cert_rank(Some(r#"{"GB":"12A"}"#)), 3);
+        assert_eq!(cert_rank(Some(r#"{"GB":"U","US":"R"}"#)), 1);
+    }
+
+    #[test]
+    fn the_us_certificate_is_mapped_when_there_is_no_british_one() {
+        assert_eq!(cert_rank(Some(r#"{"US":"TV-Y7"}"#)), 2);
+        assert_eq!(cert_rank(Some(r#"{"US":"PG-13"}"#)), 3);
+        assert_eq!(cert_rank(Some(r#"{"US":"TV-MA"}"#)), 5);
+    }
+
+    #[test]
+    fn missing_or_unrated_is_unknown() {
+        assert_eq!(cert_rank(None), 0);
+        assert_eq!(cert_rank(Some(r#"{"US":"NR"}"#)), 0);
+        assert_eq!(cert_rank(Some("not json")), 0);
+        assert_eq!(cert_rank(Some(r#"{"GB":"X","US":"NR"}"#)), 0);
     }
 }
