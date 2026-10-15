@@ -10,6 +10,8 @@ pub struct ClusterSeed {
     pub centroid: Vec<f32>,
     /// TMDB IDs of catalog items in this cluster
     pub member_ids: Vec<u32>,
+    /// Row title written for the group (from `<seeds>.names`, empty when absent)
+    pub name: String,
 }
 
 /// All cluster seeds loaded from `cluster_seeds.bin`.
@@ -78,7 +80,7 @@ impl ClusterSeeds {
                 .collect();
             pos += n_members * 4;
 
-            seeds.push(ClusterSeed { centroid, member_ids });
+            seeds.push(ClusterSeed { centroid, member_ids, name: String::new() });
         }
 
         if legacy {
@@ -95,6 +97,17 @@ impl ClusterSeeds {
             }
         }
 
+        // optional sidecar with one name per seed, in the order of the file (written by ai-engine/store/export_engine_files.py)
+        if let Ok(text) = std::fs::read_to_string(format!("{path}.names")) {
+            if let Ok(names) = serde_json::from_str::<Vec<String>>(&text) {
+                if names.len() == seeds.len() {
+                    for (s, n) in seeds.iter_mut().zip(names) { s.name = n; }
+                    info!("Seed names loaded");
+                } else {
+                    tracing::warn!("{path}.names has {} names for {} seeds — ignored", names.len(), seeds.len());
+                }
+            }
+        }
         info!("ClusterSeeds loaded: {} seeds", seeds.len());
         Ok(Arc::new(Self { seeds }))
     }

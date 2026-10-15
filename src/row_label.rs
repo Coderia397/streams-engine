@@ -468,6 +468,44 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     out
 }
 
+/// Does a written row title keep its promise? Each genre word in it (comedy, crime, war ...) must be a genre of at least 40 percent of the items shown, and a leading decade
+/// ("90s", "1980s") must hold at least 60 percent of their release years. Used before a name written for a group is shown as the row title.
+pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    let n = items.len() as f32;
+    const GENRE_WORDS: &[(&str, &str)] = &[
+        ("action", "action"), ("adventure", "adventure"), ("animation", "animation"), ("anime", "animation"), ("comed", "comedy"), ("crime", "crime"), ("documentar", "documentary"),
+        ("drama", "drama"), ("family", "family"), ("fantasy", "fantasy"), ("histor", "history"), ("horror", "horror"), ("music", "music"), ("mystery", "mystery"), ("mysteries", "mystery"),
+        ("romanc", "romance"), ("sci-fi", "sci"), ("thriller", "thriller"), ("war", "war"), ("western", "western"), ("reality", "reality"),
+    ];
+    for w in name.split(|c: char| !c.is_alphabetic() && c != '-').filter(|w| !w.is_empty()) {
+        let lw = w.to_lowercase();
+        if lw.starts_with("warm") || lw.starts_with("warn") || lw.starts_with("ward") || lw.starts_with("warr") { continue; }
+        for (k, g) in GENRE_WORDS {
+            if lw.starts_with(k) {
+                let have = items.iter().filter(|i| i.genres.iter().any(|x| x.to_lowercase().contains(g))).count() as f32;
+                if have < 0.4 * n {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(first) = name.split_whitespace().next() {
+        let digits: String = first.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if (digits.len() == 2 || digits.len() == 4) && first[digits.len()..].eq_ignore_ascii_case("s") {
+            let d: i32 = digits.parse().unwrap_or(0);
+            let start = if digits.len() == 4 { d } else if d >= 30 { 1900 + d } else { 2000 + d };
+            let years: Vec<i32> = items.iter().filter_map(|i| i.release_year).collect();
+            if years.is_empty() || (years.iter().filter(|y| (start..start + 10).contains(*y)).count() as f32) < 0.6 * years.len() as f32 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

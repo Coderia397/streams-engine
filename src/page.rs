@@ -507,6 +507,7 @@ impl<'a> PageContext<'a> {
         // parallel to the thematic subset of `rows`. Used for Hungarian alignment.
         let mut thematic_centroids: Vec<Vec<f32>> = Vec::new();
         let mut thematic_row_indices: Vec<usize> = Vec::new(); // indices into `rows`
+        let mut thematic_seed_idx: Vec<usize> = Vec::new(); // the seed each thematic row came from, parallel to thematic_row_indices
 
         // ── Fixed rows ────────────────────────────────────────────────────────
         if let Some(row) = self.build_trending_row() {
@@ -679,6 +680,7 @@ impl<'a> PageContext<'a> {
             n_row += 1;
             let row_index = rows.len();
             thematic_row_indices.push(row_index);
+            thematic_seed_idx.push(*seed_idx);
             thematic_centroids.push(centroid.clone());
             state.record_thematic(dominant_genre, centroid);
 
@@ -732,11 +734,15 @@ impl<'a> PageContext<'a> {
             );
             let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
             let mut candidates = if has_taxonomy && !derived.is_empty() { vec![derived.remove(0)] } else { Vec::new() };
+            // the name written for the group comes first; the titles derived from the displayed items follow as fallbacks
+            if let Some(seed) = thematic_seed_idx.get(ti).and_then(|i| self.seeds.seeds.get(*i)) {
+                if !seed.name.is_empty() && crate::row_label::name_fits(&seed.name, &row_catalog) { candidates.insert(0, seed.name.clone()); }
+            }
             candidates.extend(crate::row_label::candidates(&row_catalog));
             candidates.extend(derived);
             let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
             let title = state.claim_title(&candidates);
-            rows[row_idx].title = clamp_words(&title, 4);
+            rows[row_idx].title = clamp_words(&title, 6);
         }
 
         rows
@@ -1266,7 +1272,7 @@ impl<'a> PageContext<'a> {
             ));
             let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
             let title = state.claim_title(&candidates);
-            rows[row_idx].title = clamp_words(&title, 4);
+            rows[row_idx].title = clamp_words(&title, 6);
         }
 
         rows

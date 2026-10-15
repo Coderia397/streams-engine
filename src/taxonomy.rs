@@ -253,16 +253,19 @@ impl TaxonomyStore {
         }
 
         // Build N×M integer cost matrix using pathfinding::matrix::Matrix.
-        // kuhn_munkres_min requires Matrix<C>, not Vec<Vec<C>>.
+        // kuhn_munkres_min requires Matrix<C>, not Vec<Vec<C>>, and at least as many columns as rows:
+        // when fewer entries are usable than there are rows, dummy columns of high cost are added and a row assigned to one gets no title.
         // (1.0 - cosine_sim) × 10_000 → minimising cost maximises similarity.
         let n_rows = row_centroids.len();
-        let n_cols = compatible.len();
+        let n_real = compatible.len();
+        let n_cols = n_real.max(n_rows);
+        let comp = &compatible;
         let flat: Vec<i64> = row_centroids
             .iter()
             .flat_map(|centroid| {
-                compatible.iter().map(move |entry| {
-                    let sim = cosine_sim(centroid, &entry.embedding);
-                    ((1.0 - sim) * 10_000.0) as i64
+                (0..n_cols).map(move |j| match comp.get(j) {
+                    Some(entry) => ((1.0 - cosine_sim(centroid, &entry.embedding)) * 10_000.0) as i64,
+                    None => 30_000,
                 })
             })
             .collect();
@@ -278,7 +281,7 @@ impl TaxonomyStore {
             .enumerate()
             .map(|(i, centroid)| {
                 let col = assignment[i];
-                let entry = compatible[col];
+                let Some(entry) = compatible.get(col) else { return None };
                 let sim = cosine_sim(centroid, &entry.embedding);
                 if sim >= fallback_threshold {
                     Some(entry.title.clone())
@@ -287,5 +290,25 @@ impl TaxonomyStore {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod assign_tests {
+    use super::*;
+
+    fn entry(title: &str, v: Vec<f32>) -> TaxonomyEntry {
+        TaxonomyEntry { id: title.into(), title: title.into(), media_type: "both".into(), kind: "theme".into(), season: None, keywords: vec![], lgbtq_central: false, embedding: v, centered: vec![] }
+    }
+
+    /// With fewer usable entries than rows (a vocabulary that holds only the seasonal entries) the matching used to panic; rows left without an entry get no title.
+    #[test]
+    fn fewer_entries_than_rows_does_not_panic() {
+        let store = TaxonomyStore::from_raw(vec![entry("Only One", vec![1.0, 0.0])]);
+        let rows = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.6, 0.8]];
+        let titles = store.hungarian_assign(&rows, "both", 0.5);
+        assert_eq!(titles.len(), 3);
+        assert_eq!(titles.iter().filter(|t| t.is_some()).count(), 1);
+        assert_eq!(titles[0].as_deref(), Some("Only One"));
     }
 }
