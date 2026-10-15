@@ -234,9 +234,15 @@ pub fn primary_country(it: &CatalogItem) -> Option<&str> {
 /// "found family" with a row of mostly dramas becomes "Found Family Dramas"; with no genre noun, "Found Family Stories". None for a theme that is
 /// empty, longer than three words, or too generic to name a row alone.
 /// A theme in front of a genre noun, unless the two repeat a word ("Found Family Family Favorites").
+/// Singular of a plural English word, enough to tell "mystery" from "mysteries" and "drama" from "dramas".
+fn stem(w: &str) -> String {
+    let w = w.to_lowercase();
+    if let Some(b) = w.strip_suffix("ies") { format!("{b}y") } else if let Some(b) = w.strip_suffix("es") { b.to_string() } else if let Some(b) = w.strip_suffix('s') { b.to_string() } else { w }
+}
+
 fn themed(theme: &str, noun: &str) -> Option<String> {
-    let first = noun.split_whitespace().next().unwrap_or("");
-    if theme.split_whitespace().any(|w| w.eq_ignore_ascii_case(first)) {
+    let first = stem(noun.split_whitespace().next().unwrap_or(""));
+    if theme.split_whitespace().any(|w| stem(w) == first) {
         return None;
     }
     Some(format!("{theme} {noun}"))

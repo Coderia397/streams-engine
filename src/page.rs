@@ -391,7 +391,13 @@ impl<'a> PageContext<'a> {
     /// them (see `place_charts`).
     pub async fn build_page(&self) -> Vec<Row> {
         let rows = self.build_page_rows().await;
-        self.place_charts(rows)
+        let mut rows = self.place_charts(rows);
+        // another version of the same title (a remake, a re-release) is not a second suggestion in one row
+        for row in &mut rows {
+            let mut seen: HashSet<(String, String)> = HashSet::new();
+            row.items.retain(|i| seen.insert((i.media_type.clone(), crate::people::normalise(&i.title))));
+        }
+        rows
     }
 
     /// The rows of the page: the topic rows, with up to two seasonal rows (from the row vocabulary, only inside their calendar window) placed near the top
