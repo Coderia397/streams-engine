@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod fresh;
 pub mod genre_spec;
+pub mod groups;
 pub mod identity;
 pub mod centroid;
 pub mod cluster;

@@ -8,10 +8,10 @@ use std::fs::File;
 use std::sync::Arc;
 use tracing::info;
 
-pub const DIMS: usize = 2560;
+pub const DIMS: usize = 1024;
 
 /// In-memory vector store.
-/// Vectors kept as f16 (~512 MB for 100k × 2560).
+/// Vectors kept as f16 (1,024 dimensions, Qwen3-Embedding-8B cut by Matryoshka and renormalised; about 1.3 GB for 626k).
 /// Keys (type aware ids) come from the sidecar `<vectors.bin>.keys`, see `resolve_ids`.
 pub struct VectorStore {
     /// Flat f16 buffer: row i starts at i * DIMS

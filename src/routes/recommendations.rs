@@ -26,15 +26,22 @@ pub struct RecsQuery {
     pub w_pop: Option<f32>,
     pub w_rate: Option<f32>,
     pub w_profile: Option<f32>,
+    /// Tuning: boost for a title in the anchor's world level 2 group, atom and theme group
+    pub w_g2: Option<f32>,
+    pub w_atom: Option<f32>,
+    pub w_theme: Option<f32>,
 }
 fn default_limit() -> usize { 20 }
 
 /// Weights of popularity and rating in the order of recommendations (measured with ai-engine/scripts/eval_recs.py).
-const REC_POPULARITY_WEIGHT: f32 = 0.15;
+const REC_POPULARITY_WEIGHT: f32 = 0.3;
 const REC_RATING_WEIGHT: f32 = 0.06;
 /// Share of the profile similarity in the mean of the two similarities. Zero: measured with eval_recs.py on 19 anchors, the text similarity alone
 /// gave 4.3 good titles in the first 10 and the profile similarity alone 1.4 (a mean of the two 2.8 to 3.8), so the profile space is only used on request.
 const REC_PROFILE_WEIGHT: f32 = 0.0;
+const REC_G2_WEIGHT: f32 = 0.0;
+const REC_ATOM_WEIGHT: f32 = 0.0;
+const REC_THEME_WEIGHT: f32 = 0.0;
 
 fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() }
 
@@ -73,6 +80,8 @@ pub async fn recommendations(
     let restricted = maturity.is_some_and(|m| m != Maturity::Adult);
     let fetch = (limit * 8).max(80) * if restricted { 2 } else { 1 } + 1;
 
+    let (w_g2, w_atom, w_theme) = (params.w_g2.unwrap_or(REC_G2_WEIGHT), params.w_atom.unwrap_or(REC_ATOM_WEIGHT), params.w_theme.unwrap_or(REC_THEME_WEIGHT));
+    let anchor_groups = state.groups.get(&anchor_key).copied();
     let (w_pop, w_rate, w_profile) = (params.w_pop.unwrap_or(REC_POPULARITY_WEIGHT), params.w_rate.unwrap_or(REC_RATING_WEIGHT), params.w_profile.unwrap_or(REC_PROFILE_WEIGHT).clamp(0.0, 1.0));
 
     // neighbours by what the catalog text says (HNSW when ready, brute force otherwise) and by what the title is about (profile vectors)
@@ -120,7 +129,11 @@ pub async fn recommendations(
             };
             let quality = (item.popularity.ln_1p() / 100f32.ln_1p()).clamp(0.0, 1.0);
             let rating = ((item.vote_average - 5.0) / 4.0).clamp(0.0, 1.0);
-            Some((sim + w_pop * quality + w_rate * rating, sim, item))
+            let group_bonus = match (anchor_groups, state.groups.get(k)) {
+                (Some(a), Some(b)) => (if a.w2 >= 0 && a.w2 == b.w2 { w_g2 } else { 0.0 }) + (if a.atom >= 0 && a.atom == b.atom { w_atom } else { 0.0 }) + (if a.theme >= 0 && a.theme == b.theme { w_theme } else { 0.0 }),
+                _ => 0.0,
+            };
+            Some((sim + w_pop * quality + w_rate * rating + group_bonus, sim, item))
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.2.id.cmp(&b.2.id)));

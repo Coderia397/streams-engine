@@ -410,6 +410,16 @@ impl<'a> PageContext<'a> {
         rows
     }
 
+    /// The vector a seasonal row ranks a title by: its profile vector when profiles carry vectors, otherwise its catalog vector (the single database has no profile vectors).
+    fn season_vector(&self, id: u32) -> Option<Vec<f32>> {
+        if !self.profiles.vectors.is_empty() {
+            return self.profiles.vector(id);
+        }
+        let idx = self.vectors.index_of(id)?;
+        if self.vectors.is_zero_row(idx) { return None; }
+        Some(self.vectors.get_f32(idx))
+    }
+
     /// Up to two rows for what is in season (taxonomy entries of type calendar whose window is active today): the entry's description is matched against the title
     /// profiles, the titles are filtered like any page (age limit, quality) and a row needs at least MIN titles that no other row has.
     async fn build_seasonal_rows(&self, used: &HashSet<u32>) -> Vec<Row> {
@@ -449,13 +459,13 @@ impl<'a> PageContext<'a> {
                 if !in_season || taken.contains(&item.id) || !self.matches_filters(item) || !passes_member_quality(item) || !self.reliable(item) {
                     continue;
                 }
-                let sim = self.profiles.vector(item.id).map(|v| cosine_sim(&v, &e.embedding)).unwrap_or(0.0);
+                let sim = self.season_vector(item.id).map(|v| cosine_sim(&v, &e.embedding)).unwrap_or(0.0);
                 pool.push((sim + 0.15 * (crate::quality::item_quality(item) / 35.0).min(1.5), item.id));
             }
             pool.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
             let ids: Vec<u32> = pool.into_iter().take(ROW_SIZE * 4).map(|(_, id)| id).collect();
             if ids.len() < MIN { continue; }
-            let cand_vecs: Vec<(u32, Vec<f32>)> = ids.iter().filter_map(|id| self.profiles.vector(*id).map(|v| (*id, v))).collect();
+            let cand_vecs: Vec<(u32, Vec<f32>)> = ids.iter().filter_map(|id| self.season_vector(*id).map(|v| (*id, v))).collect();
             let picked = greedy_mmr(&e.embedding, &cand_vecs, ROW_SIZE, MMR_LAMBDA);
             let items: Vec<RowItem> = picked.iter().filter_map(|id| self.catalog.get(id).map(RowItem::from_catalog)).collect();
             if items.len() < MIN { continue; }
@@ -469,7 +479,7 @@ impl<'a> PageContext<'a> {
     async fn build_page_rows_inner(&self) -> Vec<Row> {
         // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
         // seeds, which are mostly adult topics with a few allowed titles left in each.
-        let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty();
+        let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles();
         if kids_home && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
             return self.build_kids_home();
         }
@@ -1456,7 +1466,7 @@ impl<'a> PageContext<'a> {
             .filter(|item| self.matches_filters(item) && only.map_or(true, |t| item.media_type == t))
             .filter(|item| !nets || chart_ok(item))
             // a children's Top 10 holds titles made for children, as the rest of their home does
-            .filter(|item| !(self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids()) && !self.profiles.vectors.is_empty()) || kid_interest(self.profiles, item))
+            .filter(|item| !(self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles()) || kid_interest(self.profiles, item))
             // a title that has not come out yet is not in a Top 10 of what people watch
             .filter(|item| !self.fresh.is_upcoming(&item.media_type, item.tmdb_id, &self.today_ymd))
             .collect();

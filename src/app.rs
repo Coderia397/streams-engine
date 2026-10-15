@@ -20,6 +20,8 @@ pub struct AppState {
     /// Index over the title profile vectors (the quality titles), which row definitions are matched against; none until built
     pub profile_hnsw: Arc<RwLock<Option<HnswIndex>>>,
     pub seeds:      Arc<ClusterSeeds>,
+    /// World, atom and theme group of every title (single database)
+    pub groups:     Arc<crate::groups::GroupMap>,
     pub vault:      Arc<CentroidVault>,
     pub taxonomy:   Arc<TaxonomyStore>,
     pub mood_vault: Arc<MoodVault>,
@@ -148,6 +150,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         hnsw: hnsw_slot,
         profile_hnsw,
         seeds,
+        groups: Arc::new(crate::groups::load(&config.db_path)),
         vault,
         taxonomy,
         mood_vault,
@@ -238,11 +241,11 @@ impl Config {
         let pick = |v2: &str, v1: &str| {
             if std::path::Path::new(&format!("{base}/{v2}")).exists() { format!("{base}/{v2}") } else { format!("{base}/{v1}") }
         };
-        let vectors_path = env("VECTORS_BIN", &pick("vectors_v2.bin", "vectors.bin"));
+        let vectors_path = env("VECTORS_BIN", &pick("vectors_v3.bin", "vectors_v2.bin"));
         // The index and the cluster seeds are only valid for the vectors file they were built from,
         // so their default names derive from it. A new vectors file never reuses an old index.
         Self {
-            db_path:            env("CATALOG_DB",    &pick("catalog_v2.db", "catalog.db")),
+            db_path:            env("CATALOG_DB",    &pick("streams_v3.db", "catalog_v2.db")),
             taxonomy_bin_path:  env("TAXONOMY_BIN",  &format!("{base}/taxonomy_embeddings.bin")),
             taxonomy_json_path: env("TAXONOMY_JSON", &format!("{base}/taxonomy_embeddings.json")),
             seeds_path:         env("SEEDS_BIN",     &format!("{vectors_path}.seeds")),

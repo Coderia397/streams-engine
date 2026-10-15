@@ -2,6 +2,7 @@ mod app;
 mod catalog;
 mod fresh;
 mod genre_spec;
+mod groups;
 mod identity;
 mod centroid;
 mod cluster;

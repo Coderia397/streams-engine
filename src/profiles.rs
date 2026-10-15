@@ -200,6 +200,9 @@ impl ProfileStore {
             .map(|(d, _)| d)
     }
 
+    /// True when title profiles are loaded (with or without their vectors)
+    pub fn has_profiles(&self) -> bool { !self.profiles.is_empty() }
+
     pub fn get(&self, key: u32) -> Option<&TitleProfile> {
         self.index.get(&key).map(|&i| &self.profiles[i])
     }
@@ -294,11 +297,13 @@ impl ProfileStore {
             let (Some(k), Some(p)) = (row.get("k").and_then(Value::as_str), row.get("p")) else { continue };
             let (Some(profile), Some((media, id))) = (parse_profile(p), k.split_once(':')) else { continue };
             let Ok(id) = id.parse::<u32>() else { continue };
-            let Some(&pos) = vector_pos.get(k) else { continue };
+            // with a vector file every kept profile has its vector (rows stay aligned); without one the profiles load as text only
+            let pos = vector_pos.get(k).copied();
+            if vector_rows > 0 && pos.is_none() { continue; }
             store.index.insert(item_key(media, id), store.profiles.len());
             store.keys.push(item_key(media, id));
             store.profiles.push(profile);
-            vectors.extend((0..DIMS).map(|d| u16::from_le_bytes([bytes[(pos * DIMS + d) * 2], bytes[(pos * DIMS + d) * 2 + 1]])));
+            if let Some(pos) = pos { vectors.extend((0..DIMS).map(|d| u16::from_le_bytes([bytes[(pos * DIMS + d) * 2], bytes[(pos * DIMS + d) * 2 + 1]]))); }
         }
         store.vectors = vectors;
         store.prepare_centring();
