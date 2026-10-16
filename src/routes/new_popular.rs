@@ -22,6 +22,8 @@ pub struct NewPopularQuery {
     /// watching | top10_movies | top10_series | just_landed | coming_soon (mobile New & Hot tabs); none gives the desktop page
     pub tab: Option<String>,
     pub limit: Option<usize>,
+    /// The visitor's session: with the six hour slot it decides the order of the rows and which languages and genres get one
+    pub session_id: Option<String>,
 }
 
 /// One title as the page sees it, from the catalog, from fresh.json, or both (the catalog supplies certificates and genres, fresh.json the
@@ -154,6 +156,9 @@ fn by_popularity(a: &&Cand, b: &&Cand) -> std::cmp::Ordering {
 
 struct RowOut {
     title: String,
+    /// Translation key of the title (`row.np_new_movies`) and its arguments; `title` is the English fallback
+    key: &'static str,
+    args: Value,
     row_type: &'static str,
     kind: &'static str,
     items: Vec<Cand>,
@@ -213,7 +218,10 @@ pub async fn new_popular(
     let tab = q.tab.as_deref().map(str::trim).filter(|t| !t.is_empty());
     let limit = q.limit.unwrap_or(if tab.is_some() { 10 } else { ROW_TITLES }).clamp(1, 30);
 
-    let cache_key = format!("newpop:{}:{}:{}:{}:{}", tab.unwrap_or("-"), limit, maturity.map_or("-", |m| m.as_str()), fresh.generated, today);
+    let slot = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize;
+    // the tabs of the phone are the same for everyone; the desktop page differs by session and six hour slot
+    let seed_part = if tab.is_some() { "-".to_string() } else { format!("{}:{}", q.session_id.as_deref().unwrap_or("-"), slot) };
+    let cache_key = format!("newpop:{}:{}:{}:{}:{}:{}", tab.unwrap_or("-"), limit, maturity.map_or("-", |m| m.as_str()), fresh.generated, today, seed_part);
     if let Some(hit) = state.feed_cache.get(&cache_key).await {
         if let Ok(v) = serde_json::from_str::<Value>(&hit) {
             return Json(v);
@@ -262,7 +270,7 @@ pub async fn new_popular(
             json!({ "surface": "new_popular", "tab": t, "generated": fresh.generated, "total_rows": rows.len(), "rows": rows })
         }
         None => {
-            let rows = desktop_rows(&catalog, &fresh, &pool, maturity, &state.profiles, &today, today_n, year, limit);
+            let rows = desktop_rows(&catalog, &fresh, &pool, maturity, &state.profiles, &today, today_n, year, limit, q.session_id.as_deref().unwrap_or("-"), slot);
             let mut seen: HashSet<(String, u32)> = HashSet::new();
             let mut out: Vec<Value> = Vec::new();
             for (i, row) in rows.into_iter().enumerate() {
@@ -276,7 +284,7 @@ pub async fn new_popular(
                 }
                 let ranked = row.row_type == "top_ten";
                 out.push(json!({
-                    "id": format!("newpop-{i}"), "row_type": row.row_type, "type": row.kind, "title": row.title,
+                    "id": format!("newpop-{i}"), "row_type": row.row_type, "type": row.kind, "title": row.title, "title_key": row.key, "title_args": row.args,
                     "items": items.iter().enumerate().map(|(n, c)| item_json(c, ranked.then_some(n + 1), today_n)).collect::<Vec<_>>(),
                 }));
                 if out.len() >= DESKTOP_ROWS {
@@ -291,39 +299,39 @@ pub async fn new_popular(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, today: &str, today_n: i64, year: i32, limit: usize) -> Vec<RowOut> {
+fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, today: &str, today_n: i64, year: i32, limit: usize, session: &str, slot: usize) -> Vec<RowOut> {
     let mut rows: Vec<RowOut> = Vec::new();
     // rows are cut to `limit` after titles shared with an earlier row are removed, so each starts from a wider list
     let wide = limit * 4;
     let recent = |c: &&Cand, days: i64| c.released(today) && c.days_since(today_n).is_some_and(|d| d <= days);
 
-    rows.push(RowOut { title: "Top 10 Movies Today".into(), row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "movie", today, year) });
-    rows.push(RowOut { title: "Top 10 Series Today".into(), row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "tv", today, year) });
+    rows.push(RowOut { title: "Top 10 Movies Today".into(), key: "row.np_top10_movies", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "movie", today, year) });
+    rows.push(RowOut { title: "Top 10 Series Today".into(), key: "row.np_top10_series", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "tv", today, year) });
 
     // what is being watched today, in TMDB's own order
     let mut trending: Vec<&Cand> = pool.iter().copied().filter(|c| c.released(today) && c.in_list("trending_day")).collect();
     trending.sort_by_key(|c| c.rank_in("trending_day"));
-    rows.push(RowOut { title: "Trending Today".into(), row_type: "vibe", kind: "trending", items: trending.into_iter().take(limit).cloned().collect() });
+    rows.push(RowOut { title: "Trending Today".into(), key: "row.np_trending_today", args: Value::Null, row_type: "vibe", kind: "trending", items: trending.into_iter().take(limit).cloned().collect() });
 
     let new_movies: Vec<&Cand> = pool.iter().copied().filter(|c| c.media_type == "movie" && recent(c, 45)).collect();
-    rows.push(RowOut { title: "New Movies".into(), row_type: "vibe", kind: "new", items: take_top(new_movies, wide) });
+    rows.push(RowOut { title: "New Movies".into(), key: "row.np_new_movies", args: Value::Null, row_type: "vibe", kind: "new", items: take_top(new_movies, wide) });
 
     let episodes: Vec<&Cand> = pool.iter().copied().filter(|c| c.media_type == "tv" && (c.in_list("airing_today") || c.in_list("on_the_air")) && c.vote_average >= 6.0 && !matches!(c.tv_type.as_deref(), Some("Talk Show") | Some("News") | Some("Soap"))).collect();
-    rows.push(RowOut { title: "New Episodes This Week".into(), row_type: "vibe", kind: "new", items: take_top(episodes, wide) });
+    rows.push(RowOut { title: "New Episodes This Week".into(), key: "row.np_new_episodes", args: Value::Null, row_type: "vibe", kind: "new", items: take_top(episodes, wide) });
 
     let mut soon_movies: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "movie" && c.upcoming(today) && c.days_since(today_n).is_some_and(|d| d >= -120)).collect(), wide);
     soon_movies.sort_by(|a, b| a.release_date.cmp(&b.release_date));
-    rows.push(RowOut { title: "Coming Soon to Cinemas".into(), row_type: "vibe", kind: "soon", items: soon_movies });
+    rows.push(RowOut { title: "Coming Soon to Cinemas".into(), key: "row.np_coming_soon_cinemas", args: Value::Null, row_type: "vibe", kind: "soon", items: soon_movies });
 
     let acclaimed: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 270) && c.vote_count >= 100 && c.vote_average >= 7.2).collect();
-    rows.push(RowOut { title: "New and Acclaimed".into(), row_type: "vibe", kind: "new", items: take_top(acclaimed, wide) });
+    rows.push(RowOut { title: "New and Acclaimed".into(), key: "row.np_new_acclaimed", args: Value::Null, row_type: "vibe", kind: "new", items: take_top(acclaimed, wide) });
 
     let mut soon_tv: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "tv" && c.upcoming(today) && c.days_since(today_n).is_some_and(|d| d >= -150)).collect(), wide);
     soon_tv.sort_by(|a, b| a.release_date.cmp(&b.release_date));
-    rows.push(RowOut { title: "Coming Soon: Series".into(), row_type: "vibe", kind: "soon", items: soon_tv });
+    rows.push(RowOut { title: "Coming Soon: Series".into(), key: "row.np_coming_soon_series", args: Value::Null, row_type: "vibe", kind: "soon", items: soon_tv });
 
     let new_tv: Vec<&Cand> = pool.iter().copied().filter(|c| c.media_type == "tv" && recent(c, 90)).collect();
-    rows.push(RowOut { title: "New Series".into(), row_type: "vibe", kind: "new", items: take_top(new_tv, wide) });
+    rows.push(RowOut { title: "New Series".into(), key: "row.np_new_series", args: Value::Null, row_type: "vibe", kind: "new", items: take_top(new_tv, wide) });
 
     // languages with enough new and trending titles each get a row, the biggest first
     let fresh_released: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 120)).collect();
@@ -335,9 +343,10 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     }
     let mut langs: Vec<(&str, usize)> = by_lang.into_iter().filter(|(_, n)| *n >= MIN_ROW_ITEMS).collect();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    for (code, _) in langs.into_iter().take(2) {
+    // the four biggest languages compete, two get a row: which two changes with the session and the slot
+    for (code, _) in pick_by_noise(langs, 4, 2, session, slot) {
         let v: Vec<&Cand> = fresh_released.iter().copied().filter(|c| c.language == code).collect();
-        rows.push(RowOut { title: format!("New in {}", crate::row_label::language_label(code).unwrap_or(code)), row_type: "vibe", kind: "language", items: take_top(v, wide) });
+        rows.push(RowOut { title: format!("New in {}", crate::row_label::language_label(code).unwrap_or(code)), key: "row.np_new_in_language", args: json!({ "language": crate::row_label::language_label(code).unwrap_or(code) }), row_type: "vibe", kind: "language", items: take_top(v, wide) });
     }
 
     // genres with the most new titles
@@ -351,18 +360,52 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     }
     let mut genres: Vec<(&str, usize)> = by_genre.into_iter().filter(|(_, n)| *n >= MIN_ROW_ITEMS + 4).collect();
     genres.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    for (g, _) in genres.into_iter().take(2) {
+    for (g, _) in pick_by_noise(genres, 5, 3, session, slot) {
         let v: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 90) && c.genres.iter().any(|x| x == g)).collect();
         let noun = crate::row_label::genre_noun(g).unwrap_or(g);
-        rows.push(RowOut { title: format!("New {noun}"), row_type: "vibe", kind: "genre", items: take_top(v, wide) });
+        rows.push(RowOut { title: format!("New {noun}"), key: "row.np_new_genre", args: json!({ "genre": noun }), row_type: "vibe", kind: "genre", items: take_top(v, wide) });
     }
 
-    // good titles of the last two years that are not yet everywhere
-    let gems: Vec<&Cand> = pool
+    // good titles of the last three years that are not yet everywhere: rated well by enough people, not among the most popular. Chosen by how well they are rated and how many rated them (not by
+    // popularity, which would bring the same few every time), with a little noise per session and slot, at most three of a genre and films and series alternating
+    let mut gems: Vec<(f32, &Cand)> = pool
         .iter()
         .copied()
-        .filter(|c| c.in_catalog && !c.upcoming(today) && c.release_year.is_some_and(|y| y >= year - 1) && c.vote_average >= 7.3 && c.vote_count >= 100 && c.popularity < 60.0 && c.popularity >= 6.0)
+        .filter(|c| c.in_catalog && !c.upcoming(today) && c.release_year.is_some_and(|y| y >= year - 2) && c.vote_average >= 7.2 && c.vote_count >= 80 && c.popularity < 60.0 && c.popularity >= 5.0)
+        .map(|c| (c.vote_average + 0.35 * (c.vote_count as f32).ln() + 1.6 * crate::page::entry_noise(session, c.tmdb_id as usize + slot), c))
         .collect();
-    rows.push(RowOut { title: "Under the Radar".into(), row_type: "vibe", kind: "gems", items: take_top(gems, wide) });
-    rows
+    gems.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.tmdb_id.cmp(&b.1.tmdb_id)));
+    let mut per_genre: HashMap<&str, usize> = HashMap::new();
+    let (mut films, mut series): (Vec<&Cand>, Vec<&Cand>) = (Vec::new(), Vec::new());
+    for (_, c) in gems {
+        let g = c.genres.first().map_or("", |g| g.as_str());
+        let n = per_genre.entry(g).or_insert(0);
+        if *n >= 3 { continue; }
+        *n += 1;
+        if c.media_type == "tv" { series.push(c) } else { films.push(c) }
+    }
+    let mut mixed: Vec<Cand> = Vec::new();
+    let (mut fi, mut si) = (films.into_iter(), series.into_iter());
+    while mixed.len() < wide {
+        match (fi.next(), si.next()) {
+            (None, None) => break,
+            (f, t) => { mixed.extend(f.cloned()); mixed.extend(t.cloned()); }
+        }
+    }
+    let (gem_title, gem_key) = [("Under the Radar", "row.np_under_the_radar"), ("Hidden Gems", "row.np_hidden_gems"), ("Worth a Closer Look", "row.np_closer_look")][slot % 3];
+    rows.push(RowOut { title: gem_title.into(), key: gem_key, args: Value::Null, row_type: "vibe", kind: "gems", items: mixed });
+
+    // the order of the rows moves a little with the session and the slot: the two charts stay first, the rest may shift a few places
+    let mut keyed: Vec<(f32, RowOut)> = rows.into_iter().enumerate().map(|(i, r)| (if i < 2 { i as f32 } else { i as f32 + (crate::page::entry_noise(session, i + slot * 31) - 0.5) * 6.0 }, r)).collect();
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.into_iter().map(|(_, r)| r).collect()
 }
+
+/// `take` of the first `pool` candidates, chosen by their place plus noise from the session and the slot.
+fn pick_by_noise<T>(mut v: Vec<(T, usize)>, pool: usize, take: usize, session: &str, slot: usize) -> Vec<(T, usize)> {
+    v.truncate(pool);
+    let mut keyed: Vec<(f32, (T, usize))> = v.into_iter().enumerate().map(|(i, x)| (i as f32 + crate::page::entry_noise(session, i * 17 + slot) * 2.5, x)).collect();
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.into_iter().take(take).map(|(_, x)| x).collect()
+}
+
