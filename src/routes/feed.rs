@@ -25,6 +25,8 @@ pub struct FeedQuery {
     pub affinity: Option<String>,
     /// Genre name filter applied to every row
     pub genre: Option<String>,
+    /// The collection a page is the page of (the id of a mood, such as `tearjerkers`): the page opens with its header and its own rows (the page Explore all opens)
+    pub collection: Option<String>,
     /// Original language code of a language page (ko, ja, es ...); every row holds only titles in that language
     pub language: Option<String>,
     /// Client session id (reserved for session-aware feeds)
@@ -234,6 +236,8 @@ pub async fn feed(
     }
     let late_night = params.hour.is_some_and(|h| h >= 22 || h <= 4);
     key = format!("{key}|n:{}", late_night as u8);
+    let collection = params.collection.as_deref().map(str::trim).filter(|c| !c.is_empty() && c.len() <= 48 && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'));
+    if let Some(c) = collection { key = format!("{key}|c:{c}"); }
     let signals = crate::signals::Signals::parse(params.saved.as_deref(), params.recent.as_deref(), params.liked.as_deref());
     if !signals.is_empty() {
         key = format!("{key}|g:{}", signals.fingerprint());
@@ -305,7 +309,11 @@ pub async fn feed(
         signals:    &signals,
     };
 
-    let all_rows = to_client_rows(ctx.build_page().await, &session_seen, &state.profiles, &fresh);
+    let (page_rows, collection_header) = match collection.and_then(|c| ctx.build_mood_collection(c)) {
+        Some((rows, header)) => (rows, Some(header)),
+        None => (ctx.build_page().await, None),
+    };
+    let all_rows = to_client_rows(page_rows, &session_seen, &state.profiles, &fresh);
     let has_more = all_rows.len() > offset + per_page && offset + per_page < cap;
     let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(offset).take(per_page).collect();
     let response = json!({
@@ -318,6 +326,7 @@ pub async fn feed(
         "offset":      offset,
         "next_offset": offset + rows.len(),
         "has_more":    has_more,
+        "header":      collection_header.or_else(|| genre_spec.as_ref().and_then(|g| g.event_id()).and_then(|ev| crate::personal::event_header(&state.vibe, &catalog, ev))),
         "chips":       if genre.is_none() && language.is_none() { ctx.season_chips() } else { Vec::new() },
         "rows":        rows,
     });

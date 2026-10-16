@@ -71,6 +71,13 @@ fn from_country(it: &CatalogItem, codes: &[&str]) -> bool {
 }
 
 impl GenreSpec {
+    /// The calendar event this page is the page of (the collection banner of Home leads here), if it is one.
+    pub fn event_id(&self) -> Option<&'static str> {
+        match self { GenreSpec::Halloween => Some("halloween"), _ => None }
+    }
+}
+
+impl GenreSpec {
     /// Whether children's titles (TMDB Kids or Family) belong on a page of this genre. Only pages about animation, anime,
     /// kids, family or teens keep them; a page for any other genre (Action, Thriller, Pride) is for adults and teens.
     pub fn keeps_children(&self) -> bool {

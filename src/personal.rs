@@ -257,11 +257,18 @@ impl<'a> PageContext<'a> {
     pub(crate) fn build_collection_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
         let slot = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize;
         let seed = format!("{}|{}", self.session, slot);
-        let count = (1 + (entry_noise(&seed, 99_991) > 0.45) as usize).min(want);
-        enum Theme<'a> { Event(&'a str), Mood(&'a crate::vibe::Mood) }
+        // two banners, a third now and then and a fourth rarely; fewer where the page asks for fewer
+        let count = (2 + (entry_noise(&seed, 99_991) > 0.45) as usize + (entry_noise(&seed, 99_993) > 0.78) as usize).min(want);
+        enum Theme<'a> { Event(&'a str), Mood(&'a crate::vibe::Mood), Topic(&'a str, &'a crate::topics::Topic) }
         let mut themes: Vec<(f32, Theme)> = Vec::new();
         for ev in self.active_events() { themes.push((0.35 + entry_noise(&seed, ev.len() * 31 + ev.bytes().map(|b| b as usize).sum::<usize>()), Theme::Event(ev))); }
         for m in &self.vibe.moods { themes.push((entry_noise(&seed, 7_000 + m.id.len() * 13 + m.id.bytes().map(|b| b as usize).sum::<usize>()) + if self.late_night && m.late { 0.4 } else { 0.0 }, Theme::Mood(m))); }
+        // the judged topics are the discoveries: one or two a slot, chosen per session, each with a banner when it holds enough titles
+        for (slug, topic) in self.topics.topics.iter() {
+            if self.catalog.topic_keys.get(slug).is_some_and(|k| k.len() >= 40) {
+                themes.push((entry_noise(&seed, 12_000 + slug.len() * 17 + slug.bytes().map(|b| b as usize).sum::<usize>()) * 0.9, Theme::Topic(slug.as_str(), topic)));
+            }
+        }
         themes.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let mut rows: Vec<Row> = Vec::new();
         let mut used = taken.clone();
@@ -287,12 +294,23 @@ impl<'a> PageContext<'a> {
                         rows.push(r);
                     }
                 }
+                Theme::Topic(slug, topic) => {
+                    let Some(keys) = self.catalog.topic_keys.get(slug) else { continue };
+                    let items = self.eligible(keys, &used, true);
+                    if items.len() < 12 { continue; }
+                    if let Some(mut r) = self.row_of(&topic.name, "collection", &items) {
+                        r.archetype = "collection".to_string();
+                        r.meta = Some(collection_meta(&format!("topic_{slug}"), "collection.topic", "Streams Collection", &topic.definition, json!({ "collection": format!("topic_{slug}") }), &r));
+                        r.items.iter().for_each(|i| { used.insert(i.id); });
+                        rows.push(r);
+                    }
+                }
                 Theme::Mood(m) => {
                     if let Some(mut r) = self.mood_row(m, &used) {
                         let names: Vec<&str> = m.groups.iter().take(3).filter_map(|(g, _)| self.group_names.get(&(5, *g)).map(|s| s.as_str())).collect();
                         r.archetype = "collection".to_string();
                         r.kind = "collection".to_string();
-                        r.meta = Some(collection_meta(&m.id, "collection.for_every_feeling", "For Every Feeling", &names.join(", "), json!({ "genre": "Moods" }), &r));
+                        r.meta = Some(collection_meta(&m.id, "collection.for_every_feeling", "For Every Feeling", &names.join(", "), json!({ "collection": m.id }), &r));
                         r.items.iter().for_each(|i| { used.insert(i.id); });
                         rows.push(r);
                     }
@@ -339,6 +357,16 @@ fn event_target(ev: &str) -> serde_json::Value {
         "pride" => json!({ "genre": "Pride" }),
         _ => json!({ "genre": ev }),
     }
+}
+
+/// The header of the page of an event (Halloween): what the banner of Home shows, for the top of the page that Explore all opens. None without the event's groups.
+pub fn event_header(vibe: &crate::vibe::VibeIndex, catalog: &crate::catalog::CatalogMap, ev: &str) -> Option<serde_json::Value> {
+    let subs = vibe.seasons.get(ev)?;
+    let names: Vec<&str> = subs.iter().filter(|s| s.kw_share >= 0.4).take(4).map(|s| s.name.as_str()).collect();
+    let images: Vec<&str> = subs.iter().flat_map(|s| s.items.iter()).filter_map(|k| catalog.get(k)).filter_map(|i| i.backdrop_path.as_deref()).filter(|p| !p.is_empty()).take(8).collect();
+    if images.is_empty() { return None; }
+    let hue = ev.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+    Some(json!({ "id": ev, "label_key": format!("event.{ev}"), "label": prettify(ev), "description": names.join(", "), "images": images, "hue": hue }))
 }
 
 fn collection_meta(id: &str, label_key: &str, label: &str, description: &str, target: serde_json::Value, row: &Row) -> serde_json::Value {

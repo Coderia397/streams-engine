@@ -76,7 +76,7 @@ const SLOT_CONTINUE: usize = 0;
 const SLOT_TOP_PICKS: usize = 1;
 const SLOT_CHART: [usize; 2] = [2, 7];
 const SLOT_LIST: usize = 3;
-const SLOT_COLLECTION: [usize; 2] = [4, 11];
+const SLOT_COLLECTION: [usize; 4] = [4, 11, 19, 28];
 const SLOT_NEW: usize = 5;
 const SLOT_ABOUT: [usize; 3] = [6, 12, 14];
 const SLOT_NEXT: usize = 9;
@@ -462,7 +462,7 @@ impl<'a> PageContext<'a> {
         if self.genre.is_none() && self.language.is_none() && self.animation.is_none() && !kids && !self.taxonomy.entries.is_empty() {
             // the collection rows (an event's banner, a mood) are built first so the seasonal rows take what is left
             let used0: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let collections = self.build_collection_rows(&used0, 2);
+            let collections = self.build_collection_rows(&used0, 4);
             rows.extend(collections);
             let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
             let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();

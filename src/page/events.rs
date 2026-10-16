@@ -157,4 +157,78 @@ impl<'a> PageContext<'a> {
         out.retain(|r| r.archetype == "trending" || seen.insert(r.title.clone()));
         out
     }
+
+    /// The page of a mood collection (what Explore all opens): the mood's own row, then one row for each vibe group that fits it, then more mood rows. Returns the rows and the header
+    /// (label, sentence, pictures, colour) of the page; None when there is no such mood.
+    pub(crate) fn build_mood_collection(&self, id: &str) -> Option<(Vec<Row>, serde_json::Value)> {
+        if let Some(slug) = id.strip_prefix("topic_") { return self.build_topic_collection(slug); }
+        let m = self.vibe.moods.iter().find(|m| m.id == id)?;
+        let mut rows: Vec<Row> = Vec::new();
+        let mut used: HashSet<u32> = HashSet::new();
+        if let Some(r) = self.mood_row(m, &used) {
+            r.items.iter().for_each(|i| { used.insert(i.id); });
+            rows.push(r);
+        }
+        let mut names: Vec<&str> = Vec::new();
+        for (g, _) in m.groups.iter().take(16) {
+            if rows.len() >= self.target_rows { break; }
+            let (Some(keys), Some(name)) = (self.vibe.members.get(g), self.group_names.get(&(5, *g))) else { continue };
+            let items = self.eligible(keys, &used, false);
+            if items.len() < 8 || !self.vibe_name_ok(name, &items) { continue; }
+            if let Some(r) = self.row_of(name, "vibe", &items) {
+                r.items.iter().for_each(|i| { used.insert(i.id); });
+                if names.len() < 3 { names.push(name.as_str()); }
+                rows.push(r);
+            }
+        }
+        if rows.len() < self.target_rows {
+            rows.extend(self.build_mood_rows(&used, self.target_rows - rows.len(), false).into_iter().filter(|r| r.title != m.title));
+        }
+        let images: Vec<&str> = rows.iter().flat_map(|r| r.items.iter()).filter_map(|i| i.backdrop_path.as_deref()).filter(|p| !p.is_empty()).take(8).collect();
+        if rows.is_empty() || images.is_empty() { return None; }
+        let hue = m.id.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+        let header = serde_json::json!({ "id": m.id, "label_key": "collection.for_every_feeling", "label": "For Every Feeling", "title": m.title, "description": names.join(", "), "images": images, "hue": hue });
+        Some((rows, header))
+    }
+
+    /// The page of a topic collection: the topic's best titles, then its titles by genre and by decade, then rows of other topics. Returns the rows and the header of the page.
+    pub(crate) fn build_topic_collection(&self, slug: &str) -> Option<(Vec<Row>, serde_json::Value)> {
+        let topic = self.topics.topics.get(slug)?;
+        let keys = self.catalog.topic_keys.get(slug)?;
+        let all = self.eligible(keys, &HashSet::new(), true);
+        if all.len() < 12 { return None; }
+        let mut rows: Vec<Row> = Vec::new();
+        let mut used: HashSet<u32> = HashSet::new();
+        if let Some(r) = self.row_of(&topic.name, "topic", &all) {
+            r.items.iter().for_each(|i| { used.insert(i.id); });
+            rows.push(r);
+        }
+        // by genre
+        let mut by_genre: std::collections::HashMap<&str, Vec<&CatalogItem>> = std::collections::HashMap::new();
+        for i in &all { if let Some(g) = i.genres.first() { by_genre.entry(g.as_str()).or_default().push(i); } }
+        let mut genres: Vec<(&str, Vec<&CatalogItem>)> = by_genre.into_iter().filter(|(_, v)| v.len() >= 10).collect();
+        genres.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+        for (g, v) in genres.iter().take(6) {
+            let fresh: Vec<&CatalogItem> = v.iter().copied().filter(|i| !used.contains(&i.id)).collect();
+            let name = format!("{} · {}", topic.name, crate::row_label::genre_noun(g).unwrap_or(g));
+            if let Some(r) = self.row_of(&name, "topic", &fresh) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
+        }
+        // by decade
+        let mut by_decade: std::collections::BTreeMap<i32, Vec<&CatalogItem>> = std::collections::BTreeMap::new();
+        for i in &all { if let Some(y) = i.release_year { by_decade.entry(y / 10 * 10).or_default().push(i); } }
+        for (d, v) in by_decade.iter().rev() {
+            let fresh: Vec<&CatalogItem> = v.iter().copied().filter(|i| !used.contains(&i.id)).collect();
+            if fresh.len() < 10 { continue; }
+            if let Some(r) = self.row_of(&format!("{} of the {}s", topic.name, d), "topic", &fresh) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
+        }
+        if rows.len() < self.target_rows {
+            let skip: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).chain(std::iter::once(topic.name.to_lowercase())).collect();
+            rows.extend(self.build_topic_rows(&used, self.target_rows - rows.len(), &skip));
+        }
+        let images: Vec<String> = rows.iter().flat_map(|r| r.items.iter()).filter_map(|i| i.backdrop_path.clone()).filter(|p| !p.is_empty()).take(8).collect();
+        if images.is_empty() { return None; }
+        let id = format!("topic_{slug}");
+        let hue = id.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+        Some((rows, serde_json::json!({ "id": id, "label_key": "collection.topic", "label": "Streams Collection", "title": topic.name, "description": topic.definition, "images": images, "hue": hue })))
+    }
 }
