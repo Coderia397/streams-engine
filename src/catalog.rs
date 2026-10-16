@@ -53,10 +53,24 @@ pub const FLAG_HALLOWEEN: u8 = 2;
 pub const FLAG_WRESTLING_EVENT: u8 = 4;
 pub const FLAG_NONSCRIPTED: u8 = 8; // news, talk, soap
 pub const FLAG_SUGGESTIVE: u8 = 16; // ecchi, harem, softcore, erotic: not for billboards, Top 10 or default rows
+/// The flags above are the data defect rules; a page asks `flags & FLAGS_RULES` to know whether any applies
+pub const FLAGS_RULES: u8 = 31;
+pub const FLAG_OVERVIEW: u8 = 32; // overview of 60 characters or more
+pub const FLAG_POSTER: u8 = 64; // has a poster
+pub const FLAG_BACKDROP: u8 = 128; // has a backdrop
 
-fn compute_flags(title: &str, keywords: &[String], tv_type: Option<&str>) -> u8 {
+fn compute_flags(title: &str, keywords: &[String], tv_type: Option<&str>, overview: &str, poster: Option<&str>, backdrop: Option<&str>) -> u8 {
     let t = title.to_lowercase();
     let mut f = 0u8;
+    if overview.chars().take(60).count() >= 60 {
+        f |= FLAG_OVERVIEW;
+    }
+    if poster.is_some_and(|p| !p.is_empty()) {
+        f |= FLAG_POSTER;
+    }
+    if backdrop.is_some_and(|b| !b.is_empty()) {
+        f |= FLAG_BACKDROP;
+    }
     if keywords.iter().any(|k| k.contains("christmas")) || t.contains("christmas") || t.contains("xmas") || t.contains("santa claus") {
         f |= FLAG_CHRISTMAS;
     }
@@ -100,18 +114,48 @@ pub fn resolve_key(catalog: &CatalogMap, tmdb_id: u32, media_type: Option<&str>)
 }
 
 impl CatalogItem {
-    /// Number of Unicode scalar values in the overview (anchor gate check).
-    pub fn overview_chars(&self) -> usize {
-        self.overview.chars().count()
+    /// Overview of 60 characters or more, poster and backdrop present: flags set once at load, so a scan of the catalog never counts characters or compares strings
+    #[inline]
+    pub fn has_overview(&self) -> bool {
+        self.flags & FLAG_OVERVIEW != 0
     }
 
-    /// Primary genre (first in list, empty string if none).
-    pub fn primary_genre(&self) -> &str {
-        self.genres.first().map(|s| s.as_str()).unwrap_or("")
+    #[inline]
+    pub fn has_poster(&self) -> bool {
+        self.flags & FLAG_POSTER != 0
+    }
+
+    #[inline]
+    pub fn has_backdrop(&self) -> bool {
+        self.flags & FLAG_BACKDROP != 0
+    }
+
+}
+
+/// The titles of the catalog by key, plus the keys of the titles that can be on a Top 10 chart (`page::chart_ok`), most popular first (made once at load,
+/// after the popularity overlay, so a chart reads its first ten matching titles instead of scanning the catalog).
+pub struct Catalog {
+    items: HashMap<u32, CatalogItem>,
+    pub chart_keys: Vec<u32>,
+}
+
+impl Catalog {
+    pub fn new(items: HashMap<u32, CatalogItem>) -> Self {
+        let mut chart: Vec<&CatalogItem> = items.values().filter(|i| crate::page::chart_ok(i)).collect();
+        chart.sort_unstable_by(|a, b| b.popularity.total_cmp(&a.popularity).then_with(|| a.id.cmp(&b.id)));
+        let chart_keys = chart.into_iter().map(|i| i.id).collect();
+        Self { items, chart_keys }
     }
 }
 
-pub type CatalogMap = HashMap<u32, CatalogItem>;
+impl std::ops::Deref for Catalog {
+    type Target = HashMap<u32, CatalogItem>;
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+pub type CatalogMap = Catalog;
 pub type SharedCatalog = Arc<ArcSwap<CatalogMap>>;
 
 /// Date (yyyymmdd) of the popularity overlay in use, 0 when there is none. Shown by /api/health.
@@ -120,7 +164,7 @@ pub static POPULARITY_ASOF: AtomicU32 = AtomicU32::new(0);
 /// Daily freshness: `popularity_refresh.db` next to the catalog (written by ai-engine/scripts/refresh_popularity.py from
 /// TMDB's daily export) replaces the stored popularity, so the Top 10, trending and ranking follow TMDB day by day.
 /// A missing or unreadable file leaves the catalog as it is. Re-read on every catalog reload (every 5 minutes).
-fn apply_popularity_overlay(map: &mut CatalogMap, db_path: &str) {
+fn apply_popularity_overlay(map: &mut HashMap<u32, CatalogItem>, db_path: &str) {
     let Some(dir) = std::path::Path::new(db_path).parent() else { return };
     let path = dir.join("popularity_refresh.db");
     if !path.exists() {
@@ -134,10 +178,9 @@ fn apply_popularity_overlay(map: &mut CatalogMap, db_path: &str) {
         let mut rows = stmt.query([])?;
         let mut n = 0usize;
         while let Some(r) = rows.next()? {
-            let mt: String = r.get(0)?;
             let id: i64 = r.get(1)?;
             let pop: f64 = r.get(2)?;
-            if let Some(item) = map.get_mut(&item_key(&mt, id as u32)) {
+            if let Some(item) = map.get_mut(&item_key(r.get_ref(0)?.as_str()?, id as u32)) {
                 item.popularity = pop as f32;
                 n += 1;
             }
@@ -235,9 +278,68 @@ pub fn cert_rank(certs: Option<&str>) -> u8 {
     }
 }
 
-pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
-    let conn = Connection::open(db_path)?;
+/// One row of the catalog query as an item.
+fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<CatalogItem> {
+    // genres stored as comma-separated string: "Action, Drama, Sci-Fi"
+    let genres_str: String = row.get(4).unwrap_or_default();
+    let genres: Vec<String> = genres_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
+    // release_year stored as TEXT — parse to i32
+    let release_year: Option<i32> = row
+        .get::<_, Option<String>>(3)
+        .unwrap_or(None)
+        .and_then(|s| s.parse().ok());
+
+    // is_anime is INTEGER 0/1
+    let is_anime: bool = row.get::<_, i64>(10).unwrap_or(0) != 0;
+
+    let media_type: String = row.get(1).unwrap_or_default();
+    let tmdb_id = row.get::<_, i64>(0)? as u32;
+
+    let title: String = row.get(2).unwrap_or_default();
+    let keywords = json_list(row.get::<_, Option<String>>(18).unwrap_or(None), true);
+    let tv_type = row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty());
+    let overview: String = row.get(5).unwrap_or_default();
+    let poster_path: Option<String> = row.get(6)?;
+    let backdrop_path: Option<String> = row.get(7)?;
+    let certs: Option<String> = row.get::<_, Option<String>>(20).unwrap_or(None);
+    let (gb, us) = cert_codes(certs.as_deref());
+    let flags = compute_flags(&title, &keywords, tv_type.as_deref(), &overview, poster_path.as_deref(), backdrop_path.as_deref());
+    Ok(CatalogItem {
+        id:            item_key(&media_type, tmdb_id),
+        tmdb_id,
+        media_type,
+        title,
+        release_year,
+        genres,
+        overview,
+        poster_path,
+        backdrop_path,
+        vote_average:  row.get::<_, f64>(8).unwrap_or(0.0) as f32,
+        popularity:    row.get::<_, f64>(9).unwrap_or(0.0) as f32,
+        is_anime,
+        tagline:       row.get(11)?,
+        director:      row.get(12)?,
+        vote_count:    row.get::<_, i64>(13).unwrap_or(0).max(0) as u32,
+        adult:         row.get::<_, i64>(14).unwrap_or(0) != 0,
+        original_language: row.get::<_, Option<String>>(15).unwrap_or(None).unwrap_or_default(),
+        tv_type,
+        countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
+        keywords,
+        runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
+        cert:          cert_rank(certs.as_deref()),
+        cert_gb:       gb,
+        cert_us:       us,
+        flags,
+    })
+}
+
+/// The catalog query: the column list of `catalog` (older files lack some columns, which then take defaults) and the name of the id column.
+fn catalog_sql(conn: &Connection) -> Result<(String, &'static str)> {
     // catalog_v2 has `tmdb_id` (the primary key `id` there is the internal key) plus optional extra columns.
     let cols: std::collections::HashSet<String> = conn
         .prepare("PRAGMA table_info(catalog)")?
@@ -246,7 +348,6 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         .collect();
     let id_col = if cols.contains("tmdb_id") { "tmdb_id" } else { "id" };
     let opt = |name: &str, default: &str| if cols.contains(name) { name.to_string() } else { format!("{default} AS {name}") };
-
     let sql = format!(
         "SELECT {id_col}, media_type, title, release_year, genres,
                 overview, poster_path, backdrop_path,
@@ -262,72 +363,38 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
         rt = opt("runtime", "0"),
         ce = opt("certs", "NULL"),
     );
-    let mut stmt = conn.prepare(&sql)?;
+    Ok((sql, id_col))
+}
 
-    let mut map = HashMap::with_capacity(900_000);
-
-    let rows = stmt.query_map([], |row| {
-        // genres stored as comma-separated string: "Action, Drama, Sci-Fi"
-        let genres_str: String = row.get(4).unwrap_or_default();
-        let genres: Vec<String> = genres_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+/// Loads the whole catalog from SQLite. The rows are decoded (lists parsed from JSON, flags computed) by several threads, each reading the rows whose id has its remainder.
+pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
+    let (sql, id_col) = catalog_sql(&Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?)?;
+    let parts = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let results: Vec<Result<Vec<CatalogItem>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..parts)
+            .map(|k| {
+                let sql = format!("{sql} WHERE {id_col} % {parts} = {k}");
+                s.spawn(move || -> Result<Vec<CatalogItem>> {
+                    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                    let mut stmt = conn.prepare(&sql)?;
+                    let items = stmt.query_map([], row_to_item)?.collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(items)
+                })
+            })
             .collect();
-
-        // release_year stored as TEXT — parse to i32
-        let release_year: Option<i32> = row
-            .get::<_, Option<String>>(3)
-            .unwrap_or(None)
-            .and_then(|s| s.parse().ok());
-
-        // is_anime is INTEGER 0/1
-        let is_anime: bool = row.get::<_, i64>(10).unwrap_or(0) != 0;
-
-        let media_type: String = row.get(1).unwrap_or_default();
-        let tmdb_id = row.get::<_, i64>(0)? as u32;
-
-        let title: String = row.get(2).unwrap_or_default();
-        let keywords = json_list(row.get::<_, Option<String>>(18).unwrap_or(None), true);
-        let tv_type = row.get::<_, Option<String>>(16).unwrap_or(None).filter(|s| !s.is_empty());
-        let flags = compute_flags(&title, &keywords, tv_type.as_deref());
-        Ok(CatalogItem {
-            id:            item_key(&media_type, tmdb_id),
-            tmdb_id,
-            media_type,
-            title,
-            release_year,
-            genres,
-            overview:      row.get(5).unwrap_or_default(),
-            poster_path:   row.get(6)?,
-            backdrop_path: row.get(7)?,
-            vote_average:  row.get::<_, f64>(8).unwrap_or(0.0) as f32,
-            popularity:    row.get::<_, f64>(9).unwrap_or(0.0) as f32,
-            is_anime,
-            tagline:       row.get(11)?,
-            director:      row.get(12)?,
-            vote_count:    row.get::<_, i64>(13).unwrap_or(0).max(0) as u32,
-            adult:         row.get::<_, i64>(14).unwrap_or(0) != 0,
-            original_language: row.get::<_, Option<String>>(15).unwrap_or(None).unwrap_or_default(),
-            tv_type,
-            countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
-            keywords,
-            runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
-            cert:          cert_rank(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()),
-            cert_gb:       cert_codes(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()).0,
-            cert_us:       cert_codes(row.get::<_, Option<String>>(20).unwrap_or(None).as_deref()).1,
-            flags,
-        })
-    })?;
-
-    for row in rows {
-        let item = row?;
-        map.insert(item.id, item);
+        handles.into_iter().map(|h| h.join().expect("catalog loader panicked")).collect()
+    });
+    let mut map = HashMap::with_capacity(900_000);
+    for part in results {
+        for item in part? {
+            map.insert(item.id, item);
+        }
     }
 
     apply_popularity_overlay(&mut map, db_path);
-    info!("Catalog loaded: {} items", map.len());
-    Ok(map)
+    let catalog = Catalog::new(map);
+    info!("Catalog loaded: {} items, {} on the chart list", catalog.len(), catalog.chart_keys.len());
+    Ok(catalog)
 }
 
 /// Create a shared, atomically-swappable catalog pointer.
@@ -336,14 +403,26 @@ pub fn make_shared_catalog(db_path: &str) -> Result<SharedCatalog> {
     Ok(Arc::new(ArcSwap::from_pointee(map)))
 }
 
-/// Background task: re-loads catalog from SQLite every 5 minutes and atomically
-/// swaps the shared pointer. All readers see a consistent snapshot with zero locking.
+/// Size and modification time of the files the catalog is made from (the database and the daily popularity overlay): a reload is needed only when one changed.
+fn source_stamp(db_path: &str) -> [Option<(u64, std::time::SystemTime)>; 2] {
+    let stamp = |p: &std::path::Path| std::fs::metadata(p).ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+    let db = std::path::Path::new(db_path);
+    [stamp(db), db.parent().and_then(|d| stamp(&d.join("popularity_refresh.db")))]
+}
+
+/// Background task: every 5 minutes checks whether the catalog database or the popularity overlay changed and, only then, re-loads the catalog from SQLite
+/// and atomically swaps the shared pointer. All readers see a consistent snapshot with zero locking.
 pub fn spawn_catalog_refresh(catalog: SharedCatalog, db_path: String) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(300));
         interval.tick().await; // skip immediate first tick
+        let mut loaded = source_stamp(&db_path);
         loop {
             interval.tick().await;
+            let now = source_stamp(&db_path);
+            if now == loaded {
+                continue;
+            }
             match tokio::task::spawn_blocking({
                 let p = db_path.clone();
                 move || load_catalog(&p)
@@ -352,6 +431,7 @@ pub fn spawn_catalog_refresh(catalog: SharedCatalog, db_path: String) {
             {
                 Ok(Ok(new_map)) => {
                     catalog.store(Arc::new(new_map));
+                    loaded = now;
                     info!("Catalog refreshed");
                 }
                 Ok(Err(e)) => warn!("Catalog refresh error: {e}"),

@@ -10,7 +10,6 @@ use tracing::info;
 /// A single taxonomy entry from `generate_taxonomy.py`.
 #[derive(Debug, Clone)]
 pub struct TaxonomyEntry {
-    pub id: String,
     pub title: String,
     /// "movie", "tv", or "both"
     pub media_type: String,
@@ -22,7 +21,9 @@ pub struct TaxonomyEntry {
     /// Seasonal rows only: catalog keywords a title must carry to fill the row, and whether the title profile must say LGBTQ+ is central
     pub keywords: Vec<String>,
     pub lgbtq_central: bool,
-    /// L2-normalised 2560d embedding of the `vibe_query` string
+    /// Calendar entries: the event they belong to (christmas, halloween, valentines ...), empty otherwise
+    pub event: String,
+    /// L2-normalised 1,024 dimension embedding of the `vibe_query` string
     pub embedding: Vec<f32>,
     /// `embedding` minus the corpus mean vector, renormalised. Cosine in this
     /// space is not squashed by the shared offset of the embedding cone.
@@ -102,7 +103,6 @@ struct TaxonomySidecar {
 
 #[derive(Deserialize)]
 struct TaxonomyMeta {
-    id: String,
     title: String,
     media_type: String,
     #[serde(default, rename = "type")]
@@ -113,6 +113,8 @@ struct TaxonomyMeta {
     keywords: Vec<String>,
     #[serde(default)]
     lgbtq_central: bool,
+    #[serde(default)]
+    event: Option<String>,
 }
 
 /// In-memory store of all taxonomy embeddings.
@@ -156,21 +158,18 @@ impl TaxonomyStore {
         let mut entries = Vec::with_capacity(n);
         for (i, meta) in sidecar.entries.into_iter().enumerate() {
             let offset = 4 + i * DIMS * 4;
-            let mut embedding: Vec<f32> = bin_bytes[offset..offset + DIMS * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
+            let mut embedding: Vec<f32> = crate::vectors::le_f32s(&bin_bytes[offset..offset + DIMS * 4]);
             l2_normalize(&mut embedding);
 
             let season = meta.seasonal.as_ref().and_then(parse_season);
             entries.push(TaxonomyEntry {
-                id: meta.id,
                 title: meta.title,
                 media_type: meta.media_type,
                 kind: meta.kind.unwrap_or_default(),
                 season,
                 keywords: meta.keywords.iter().map(|k| k.to_lowercase()).collect(),
                 lgbtq_central: meta.lgbtq_central,
+                event: meta.event.unwrap_or_default(),
                 centered: Vec::new(),
                 embedding,
             });
@@ -244,7 +243,7 @@ impl TaxonomyStore {
             .iter()
             .filter(|e| {
                 (e.media_type == "both" || e.media_type == surface || surface == "both")
-                    && e.season.map_or(true, |s| s.active_on(today))
+                    && e.season.is_none_or(|s| s.active_on(today))
             })
             .collect();
 
@@ -281,7 +280,7 @@ impl TaxonomyStore {
             .enumerate()
             .map(|(i, centroid)| {
                 let col = assignment[i];
-                let Some(entry) = compatible.get(col) else { return None };
+                let entry = compatible.get(col)?;
                 let sim = cosine_sim(centroid, &entry.embedding);
                 if sim >= fallback_threshold {
                     Some(entry.title.clone())
@@ -298,7 +297,7 @@ mod assign_tests {
     use super::*;
 
     fn entry(title: &str, v: Vec<f32>) -> TaxonomyEntry {
-        TaxonomyEntry { id: title.into(), title: title.into(), media_type: "both".into(), kind: "theme".into(), season: None, keywords: vec![], lgbtq_central: false, embedding: v, centered: vec![] }
+        TaxonomyEntry { title: title.into(), media_type: "both".into(), kind: "theme".into(), season: None, keywords: vec![], lgbtq_central: false, event: String::new(), embedding: v, centered: vec![] }
     }
 
     /// With fewer usable entries than rows (a vocabulary that holds only the seasonal entries) the matching used to panic; rows left without an entry get no title.

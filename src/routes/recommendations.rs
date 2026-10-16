@@ -109,7 +109,7 @@ pub async fn recommendations(
         .iter()
         .filter_map(|k| {
             let item = catalog.get(k)?;
-            if !maturity.map_or(true, |m| crate::page::maturity_allows_with(m, &state.profiles, item)) {
+            if !maturity.is_none_or(|m| crate::page::maturity_allows_with(m, &state.profiles, item)) {
                 return None;
             }
             // a short (a clip, a making of) is no match for a feature, and another version of the same title is not a new suggestion

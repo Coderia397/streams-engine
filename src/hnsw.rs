@@ -38,12 +38,14 @@ impl HnswIndex {
         }
     }
 
-    /// Load a pre-built index from disk.
-    /// usearch 2.x: load() is an INSTANCE method — create empty Index first,
-    /// then call load() on it to populate from file.
+    /// Open a pre-built index from disk. The file is memory mapped (`view`), so opening takes milliseconds and the pages are read when a search reaches them;
+    /// a mapped index is read only, which is all a served index needs. Falls back to reading the whole file into memory.
+    /// usearch 2.x: view() and load() are INSTANCE methods — create the empty Index first.
     pub fn load(path: &str) -> Result<Self> {
         let inner = Index::new(&Self::make_options())?;
-        inner.load(path)?;
+        if inner.view(path).is_err() {
+            inner.load(path)?;
+        }
         let n = inner.size();
         info!("HNSW index loaded from {path} ({n} vectors)");
         Ok(Self { inner })
@@ -52,6 +54,10 @@ impl HnswIndex {
     /// Number of vectors in the index.
     pub fn len(&self) -> usize {
         self.inner.size()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Build a new index over every vector in the store, in parallel.
@@ -68,7 +74,7 @@ impl HnswIndex {
                 inner.add(store.ids[i] as u64, &store.get_f32(i))?;
             }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if d % step == 0 {
+            if d.is_multiple_of(step) {
                 info!("HNSW build progress: {d}/{}", store.n_vecs);
             }
             Ok(())
@@ -108,7 +114,7 @@ impl HnswIndex {
         Ok(matches
             .keys
             .into_iter()
-            .zip(matches.distances.into_iter())
+            .zip(matches.distances)
             .map(|(key, dist)| (key as u32, 1.0 - dist)) // convert distance → similarity
             .collect())
     }

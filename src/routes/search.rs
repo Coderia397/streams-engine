@@ -145,7 +145,7 @@ pub async fn search(
         .into_iter()
         .filter(|k| seen.insert(*k))
         .filter_map(|k| catalog.get(&k))
-        .filter(|item| maturity.map_or(true, |m| crate::page::maturity_allows_with(m, &state.profiles, item)))
+        .filter(|item| maturity.is_none_or(|m| crate::page::maturity_allows_with(m, &state.profiles, item)))
         .take(wanted)
         .map(result_json)
         .collect();

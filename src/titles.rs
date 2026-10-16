@@ -73,7 +73,7 @@ pub fn clamp_words(title: &str, max_words: usize) -> String {
     let max_words = if title.starts_with("Like ") { max_words + 3 } else { max_words };
     let mut words: Vec<&str> = title.split_whitespace().take(max_words).collect();
     // Never end on a dangling connector like "&"
-    while words.last().is_some_and(|w| *w == "&" || *w == "and") {
+    while words.last().is_some_and(|w| matches!(w.to_lowercase().as_str(), "&" | "and" | "of" | "the" | "to" | "in" | "for" | "with" | "a" | "an" | "from" | "on")) {
         words.pop();
     }
     words.join(" ")

@@ -73,7 +73,7 @@ pub fn compute(store: &TaxonomyStore, catalog: &CatalogMap, index: &HnswIndex, t
     if std::fs::write(&tmp, &out).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
-    let ok = (0..n).filter(|&i| store.support_for(i, "both").map_or(false, |s| s >= 12)).count();
+    let ok = (0..n).filter(|&i| store.support_for(i, "both").is_some_and(|s| s >= 12)).count();
     info!("Taxonomy support computed for {n} entries in {:.1}s: {ok} can fill a row", t0.elapsed().as_secs_f32());
     let _ = Ordering::Relaxed;
 }

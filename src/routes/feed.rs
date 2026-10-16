@@ -36,6 +36,8 @@ pub struct FeedQuery {
     /// Rows to skip, for infinite scroll (default 0). The page is built once up to
     /// offset + rows and cached, so later pages continue it without repeats.
     pub offset: Option<usize>,
+    /// Local hour of the client (0 to 23). From 22 to 4 the page leads with late night moods.
+    pub hour: Option<u8>,
 }
 
 /// Row policy derived in ai-engine/config/row_architecture.json (surfaces block).
@@ -59,7 +61,7 @@ pub fn genre_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::pro
             (surface == "both" || i.media_type == surface)
                 && crate::page::genre_ok_with(Some(spec), profiles, i)
                 && crate::page::audience_fits_with(Some(spec), maturity, profiles, i)
-                && maturity.map_or(true, |m| crate::page::maturity_allows_with(m, profiles, i))
+                && maturity.is_none_or(|m| crate::page::maturity_allows_with(m, profiles, i))
                 && crate::page::passes_member_quality(i)
                 && crate::page::meets_vote_floor(i, true)
         })
@@ -75,7 +77,7 @@ pub fn language_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::
             (surface == "both" || i.media_type == surface)
                 && crate::page::language_matches(language, &i.original_language)
                 && crate::page::audience_fits_with(None, maturity, profiles, i)
-                && maturity.map_or(true, |m| crate::page::maturity_allows_with(m, profiles, i))
+                && maturity.is_none_or(|m| crate::page::maturity_allows_with(m, profiles, i))
                 && crate::page::passes_member_quality(i)
                 && crate::page::meets_vote_floor(i, true)
         })
@@ -221,6 +223,8 @@ pub async fn feed(
     if session_version > 0 {
         key = format!("{key}|{}|v{session_version}", session_id.as_deref().unwrap_or(""));
     }
+    let late_night = params.hour.is_some_and(|h| h >= 22 || h <= 4);
+    key = format!("{key}|n:{}", late_night as u8);
     // pages differ per maturity
     key = format!("{key}|m:{}|l:{}", maturity.map_or("-", |m| m.as_str()), language.as_deref().unwrap_or(""));
 
@@ -258,6 +262,10 @@ pub async fn feed(
         hnsw:       &state.hnsw,
         profile_hnsw: &state.profile_hnsw,
         seeds:      &state.seeds,
+        groups:     &state.groups,
+        group_names: &state.group_names,
+        vibe:       &state.vibe,
+        late_night,
         vault:      &state.vault,
         taxonomy:   &state.taxonomy,
         mood_vault: &state.mood_vault,

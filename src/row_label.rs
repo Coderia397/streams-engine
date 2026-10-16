@@ -228,7 +228,7 @@ fn fits_language(country: &str, language: &str) -> bool {
 /// The one country that names a title: the first listed country, if the title's original language fits it.
 pub fn primary_country(it: &CatalogItem) -> Option<&str> {
     let first = it.countries.first()?;
-    fits_language(first, &it.original_language).then(|| first.as_str())
+    fits_language(first, &it.original_language).then_some(first.as_str())
 }
 
 /// "found family" with a row of mostly dramas becomes "Found Family Dramas"; with no genre noun, "Found Family Stories". None for a theme that is
@@ -383,7 +383,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     }
     let min_theme = ((n as f32) * 0.4).ceil() as usize;
     let mut themes: Vec<(&str, bool, usize)> = tcount.into_iter().filter(|t| t.2 >= min_theme.max(4)).collect();
-    themes.sort_by(|a, b| b.2.cmp(&a.2));
+    themes.sort_by_key(|t| std::cmp::Reverse(t.2));
 
     // decade, strict
     let mut dcount: HashMap<i32, usize> = HashMap::new();
@@ -444,7 +444,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
         if let Some(g2) = second_genre.and_then(noun) { push(format!("{c} {g} & {g2}")); }
     }
     // old films: "Classic Comedies" when at least 70 percent are from before 1980
-    let old_share = share(items.iter().filter(|i| i.release_year.map_or(false, |y| y < 1980)).count());
+    let old_share = share(items.iter().filter(|i| i.release_year.is_some_and(|y| y < 1980)).count());
     if let Some(g) = gnoun {
         if old_share >= 0.7 && items.iter().all(|i| i.media_type == "movie") {
             push(format!("Classic {g}"));
@@ -478,7 +478,7 @@ pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
     const GENRE_WORDS: &[(&str, &str)] = &[
         ("action", "action"), ("adventure", "adventure"), ("animation", "animation"), ("anime", "animation"), ("comed", "comedy"), ("crime", "crime"), ("documentar", "documentary"),
         ("drama", "drama"), ("family", "family"), ("fantasy", "fantasy"), ("histor", "history"), ("horror", "horror"), ("music", "music"), ("mystery", "mystery"), ("mysteries", "mystery"),
-        ("romanc", "romance"), ("sci-fi", "sci"), ("thriller", "thriller"), ("war", "war"), ("western", "western"), ("reality", "reality"),
+        ("romanc", "romance"), ("rom-com", "romance"), ("rom-com", "comedy"), ("romcom", "romance"), ("romcom", "comedy"), ("sci-fi", "sci"), ("thriller", "thriller"), ("war", "war"), ("western", "western"), ("reality", "reality"),
     ];
     for w in name.split(|c: char| !c.is_alphabetic() && c != '-').filter(|w| !w.is_empty()) {
         let lw = w.to_lowercase();
@@ -492,15 +492,22 @@ pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
             }
         }
     }
-    if let Some(first) = name.split_whitespace().next() {
-        let digits: String = first.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if (digits.len() == 2 || digits.len() == 4) && first[digits.len()..].eq_ignore_ascii_case("s") {
+    // every decade named anywhere in the title ("90s", "2000s", "of the 1950s and 1960") must hold the years of the items: together they cover at least 60 percent
+    let mut decades: Vec<i32> = Vec::new();
+    for w in name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        let lw = w.to_lowercase();
+        let Some(digits) = lw.strip_suffix('s').or(Some(lw.as_str())).map(|d| d.to_string()) else { continue };
+        let is_decade = lw.ends_with('s') && (digits.len() == 2 || digits.len() == 4) && digits.chars().all(|c| c.is_ascii_digit());
+        let bare_year = !lw.ends_with('s') && digits.len() == 4 && digits.chars().all(|c| c.is_ascii_digit()) && !name.contains(&format!("{digits}s")) && (name.to_lowercase().contains(" to ") || name.to_lowercase().contains(" and "));
+        if is_decade || bare_year {
             let d: i32 = digits.parse().unwrap_or(0);
-            let start = if digits.len() == 4 { d } else if d >= 30 { 1900 + d } else { 2000 + d };
-            let years: Vec<i32> = items.iter().filter_map(|i| i.release_year).collect();
-            if years.is_empty() || (years.iter().filter(|y| (start..start + 10).contains(*y)).count() as f32) < 0.6 * years.len() as f32 {
-                return false;
-            }
+            decades.push(if digits.len() == 4 { d / 10 * 10 } else if d >= 30 { 1900 + d } else { 2000 + d });
+        }
+    }
+    if !decades.is_empty() {
+        let years: Vec<i32> = items.iter().filter_map(|i| i.release_year).collect();
+        if years.is_empty() || (years.iter().filter(|y| decades.iter().any(|d| (*d..*d + 10).contains(*y))).count() as f32) < 0.6 * years.len() as f32 {
+            return false;
         }
     }
     true
@@ -582,5 +589,39 @@ mod tests {
         let thr: Vec<CatalogItem> = (0..8).map(|i| item(&["Thriller"], &["US"], &[], 2000 + i)).collect();
         let thr_refs: Vec<&CatalogItem> = thr.iter().collect();
         assert_eq!(tone_title("Suspenseful", &thr_refs), None);
+    }
+}
+
+#[cfg(test)]
+mod name_fit_tests {
+    use super::*;
+
+    fn item(year: i32, genres: &[&str]) -> CatalogItem {
+        CatalogItem {
+            id: year as u32, tmdb_id: year as u32, media_type: "movie".into(), title: format!("T{year}"), release_year: Some(year), genres: genres.iter().map(|g| g.to_string()).collect(), overview: String::new(), tagline: None,
+            director: None, poster_path: None, backdrop_path: None, vote_average: 7.0, popularity: 10.0, is_anime: false, vote_count: 100, adult: false, original_language: "en".into(), tv_type: None,
+            countries: vec![], keywords: vec![], cert: 0, cert_gb: 0, cert_us: 0, runtime: 100, flags: 0,
+        }
+    }
+
+    #[test]
+    fn a_decade_anywhere_in_the_name_must_be_true() {
+        let in_2000s: Vec<CatalogItem> = (2000..2010).map(|y| item(y, &["Comedy", "Romance"])).collect();
+        let spread: Vec<CatalogItem> = (1950..2020).step_by(7).map(|y| item(y, &["Comedy", "Romance"])).collect();
+        let a: Vec<&CatalogItem> = in_2000s.iter().collect();
+        let b: Vec<&CatalogItem> = spread.iter().collect();
+        assert!(name_fits("Romantic Comedies of the 2000s", &a));
+        assert!(!name_fits("Romantic Comedies of the 2000s", &b));
+        assert!(name_fits("Romantic Comedies", &b));
+    }
+
+    #[test]
+    fn a_rom_com_name_needs_romance_and_comedy() {
+        let both: Vec<CatalogItem> = (2000..2010).map(|y| item(y, &["Comedy", "Romance"])).collect();
+        let horror: Vec<CatalogItem> = (2000..2010).map(|y| item(y, &["Horror", "Fantasy"])).collect();
+        let a: Vec<&CatalogItem> = both.iter().collect();
+        let b: Vec<&CatalogItem> = horror.iter().collect();
+        assert!(name_fits("Holiday Rom-Coms", &a));
+        assert!(!name_fits("Spooky Fantasy Rom-Coms", &b));
     }
 }

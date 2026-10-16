@@ -15,7 +15,6 @@ use crate::identity::{maturity_of, MaybeCaller};
 /// Candidates kept per surface/genre before the session-seeded draw.
 const POOL_SIZE: usize = 50;
 const MIN_VOTE_AVERAGE: f32 = 6.5;
-const MIN_OVERVIEW_CHARS: usize = 60;
 const MIN_POPULARITY: f32 = 15.0;
 /// Formats that make poor hero banners.
 const EXCLUDED_GENRES: [&str; 5] = ["News", "Talk", "Soap", "Reality", "Documentary"];
@@ -87,9 +86,9 @@ pub async fn hero_feed(
     let surface = q.surface.to_lowercase();
     let genre = q.genre.as_deref().map(str::trim).filter(|g| !g.is_empty()).map(str::to_lowercase);
     // The client sends a genre id or name; both resolve through genre_spec for this surface
-    let hero_surface = match surface_media_type(&surface) { Some(m) => m, None => "both" };
+    let hero_surface = surface_media_type(&surface).unwrap_or("both");
     let genre_spec = genre.as_deref().map(|g| crate::genre_spec::resolve(g, hero_surface));
-    let nonscripted_ok = genre_spec.as_ref().map_or(false, |s| s.includes_nonscripted());
+    let nonscripted_ok = genre_spec.as_ref().is_some_and(|s| s.includes_nonscripted());
     // A verified caller's session is its profile (or user) id, whatever the query says
     let session = caller.as_ref().map(|c| c.session_key()).or_else(|| q.session_id.clone()).unwrap_or_default();
     let limit = q.limit.clamp(1, 20);
@@ -111,17 +110,17 @@ pub async fn hero_feed(
     let mut pool: Vec<&CatalogItem> = catalog
         .values()
         .filter(|i| {
-            !seen.contains(&i.id)
-                && i.backdrop_path.as_deref().is_some_and(|b| !b.is_empty())
-                && i.poster_path.as_deref().is_some_and(|p| !p.is_empty())
-                && i.vote_average >= MIN_VOTE_AVERAGE
+            i.vote_average >= MIN_VOTE_AVERAGE
                 && i.popularity >= MIN_POPULARITY
+                && i.has_backdrop()
+                && i.has_poster()
+                && i.has_overview()
+                && !seen.contains(&i.id)
                 && (nonscripted_ok || !i.genres.iter().any(|g| EXCLUDED_GENRES.iter().any(|x| g.eq_ignore_ascii_case(x))))
-                && i.overview_chars() >= MIN_OVERVIEW_CHARS
-                && media_type.map_or(true, |m| i.media_type == m)
+                && media_type.is_none_or(|m| i.media_type == m)
                 && (!crate::page::safety_nets() || i.flags & crate::catalog::FLAG_SUGGESTIVE == 0)
-                && genre_spec.as_ref().map_or(true, |spec| spec.matches(i))
-                && maturity.map_or(true, |m| m.allows(i))
+                && genre_spec.as_ref().is_none_or(|spec| spec.matches(i))
+                && maturity.is_none_or(|m| m.allows(i))
         })
         .collect();
 

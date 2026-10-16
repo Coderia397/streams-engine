@@ -22,6 +22,10 @@ pub struct AppState {
     pub seeds:      Arc<ClusterSeeds>,
     /// World, atom and theme group of every title (single database)
     pub groups:     Arc<crate::groups::GroupMap>,
+    /// Names of the groups at every level of the hierarchy
+    pub group_names: Arc<crate::groups::GroupNames>,
+    /// Vibe group members, moods and seasonal sub groups
+    pub vibe:       Arc<crate::vibe::VibeIndex>,
     pub vault:      Arc<CentroidVault>,
     pub taxonomy:   Arc<TaxonomyStore>,
     pub mood_vault: Arc<MoodVault>,
@@ -41,75 +45,90 @@ pub struct AppState {
     pub config:     Arc<Config>,
 }
 
-/// Load all assets and build AppState. HNSW may still build in background.
-pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
-    // 1. Catalog (SQLite → ArcSwap<HashMap>)
-    let catalog = make_shared_catalog(&config.db_path)?;
-    spawn_catalog_refresh(catalog.clone(), config.db_path.clone());
+/// The result of a startup loader thread (a panic there is a bug and stops the start).
+fn joined<T>(r: std::thread::Result<T>) -> T {
+    r.expect("startup loader panicked")
+}
 
-    // 2. Vectors — IDs derived from catalog.db (no separate IDs file)
-    let vectors = VectorStore::load(&config.vectors_path, &config.db_path)?;
-
-    // 3. Taxonomy embeddings (optional — engine degrades gracefully without them)
-    let taxonomy = TaxonomyStore::load(&config.taxonomy_bin_path, &config.taxonomy_json_path)
-        .unwrap_or_else(|e| {
-            tracing::warn!("TaxonomyStore not loaded ({e}) — using mood+genre fallback titles");
-            TaxonomyStore::from_raw(vec![])
-        });
-
-    // 3b. Corpus mean and centred taxonomy vectors
-    let mean = Arc::new(vectors.compute_mean());
-    let mut taxonomy = taxonomy;
-    // Row definitions are matched against the title profile vectors when those exist, so they are centred on the mean of the profile vectors
-    // (a different text from the catalog's, with a different mean); otherwise on the catalog mean.
-    let profile_dir0 = std::path::Path::new(&config.db_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let profiles0 = crate::profiles::ProfileStore::load(&profile_dir0);
-    if let Some(t) = Arc::get_mut(&mut taxonomy) {
-        if profiles0.mean.len() == crate::profiles::DIMS { t.center_with(&profiles0.mean); } else { t.center_with(&mean); }
+/// Opens the HNSW index file when it exists and matches the vectors file (stamp, or HNSW_TRUST_INDEX=1 for a downloaded copy whose file times cannot match). None otherwise.
+fn open_index_file(config: &Config, stamp: &str) -> Option<HnswIndex> {
+    if !std::path::Path::new(&config.index_path).exists() {
+        return None;
     }
-
-    // 4. Cluster seeds
-    let seeds = ClusterSeeds::load(&config.seeds_path, &config.seeds_legacy_path, &catalog.load())?;
-
-    // 5. CentroidVault (genre centroids from top-quality catalog items)
-    let catalog_guard = catalog.load();
-    let vault = CentroidVault::compute(&catalog_guard, &vectors)?;
-    drop(catalog_guard);
-
-    // 6. MoodVault — from mood_embeddings.bin (Colab notebook Part A); empty when absent
-    let mood_vault = Arc::new(MoodVault::new(
-        crate::mood::load_mood_embeddings(&config.mood_bin_path).unwrap_or_else(|e| {
-            tracing::warn!("MoodVault not loaded ({e}) — row titles use era and genre only");
-            vec![]
-        }),
-    ));
-
-    // 7. HNSW index
-    let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
-    let stamp = vectors_stamp(&config.vectors_path);
     let stamp_file = format!("{}.stamp", config.index_path);
-    // HNSW_TRUST_INDEX=1: a downloaded copy has new file times, so the stamp (size and time of the vectors file) cannot match; the index is trusted as it is
     let trust = std::env::var("HNSW_TRUST_INDEX").map(|v| v == "1").unwrap_or(false);
     let stamp_ok = trust || std::fs::read_to_string(&stamp_file).map(|s| s.trim() == stamp).unwrap_or(false);
-    if std::path::Path::new(&config.index_path).exists() && !stamp_ok {
+    if !stamp_ok {
         tracing::warn!("HNSW index has no matching stamp for {} — it was built from other vectors, rebuilding", config.vectors_path);
+        return None;
     }
-    if std::path::Path::new(&config.index_path).exists() && stamp_ok {
-        match HnswIndex::load(&config.index_path) {
-            Ok(idx) if idx.len() * 100 >= vectors.n_vecs * 95 => {
-                *hnsw_slot.write().await = Some(idx);
-                ENGINE_READY.store(true, Ordering::Relaxed);
-                info!("HNSW index loaded from disk");
-            }
-            Ok(idx) => tracing::warn!(
-                "HNSW index is stale ({} of {} vectors) — rebuilding in background",
-                idx.len(), vectors.n_vecs
-            ),
-            Err(e) => tracing::warn!("HNSW load failed ({e}) — rebuilding in background"),
+    HnswIndex::load(&config.index_path)
+        .map_err(|e| tracing::warn!("HNSW load failed ({e}) — rebuilding in background"))
+        .ok()
+}
+
+/// Load all assets and build AppState. HNSW may still build in background.
+/// The loads that do not depend on each other run in parallel threads (first the files and tables, then what needs the catalog or the vectors).
+pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
+    let db = config.db_path.as_str();
+    let profile_dir = std::path::Path::new(db).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let stamp = vectors_stamp(&config.vectors_path);
+
+    // Stage 1: independent loads. The catalog is the SQLite table in an ArcSwap, the vectors map the f16 file; the rest read small files and tables.
+    let (catalog, vectors, taxonomy, profiles, people, groups_map, group_names, fresh_store, mood_vectors, index) = std::thread::scope(|s| {
+        let h_catalog = s.spawn(|| make_shared_catalog(db));
+        let h_vectors = s.spawn(|| VectorStore::load(&config.vectors_path, db));
+        let h_taxonomy = s.spawn(|| TaxonomyStore::load(&config.taxonomy_bin_path, &config.taxonomy_json_path));
+        let h_profiles = s.spawn(|| crate::profiles::ProfileStore::load(&profile_dir));
+        let h_people = s.spawn(|| crate::people::PeopleIndex::load(db));
+        let h_groups = s.spawn(|| crate::groups::load(db));
+        let h_names = s.spawn(|| crate::groups::load_names(db));
+        let h_fresh = s.spawn(|| crate::fresh::FreshStore::load(&profile_dir));
+        let h_mood = s.spawn(|| crate::mood::load_mood_embeddings(&config.mood_bin_path));
+        let h_index = s.spawn(|| open_index_file(config, &stamp));
+        (joined(h_catalog.join()), joined(h_vectors.join()), joined(h_taxonomy.join()), joined(h_profiles.join()), joined(h_people.join()), joined(h_groups.join()), joined(h_names.join()), joined(h_fresh.join()), joined(h_mood.join()), joined(h_index.join()))
+    });
+    let catalog = catalog?;
+    let vectors = vectors?;
+    spawn_catalog_refresh(catalog.clone(), config.db_path.clone());
+    let mut taxonomy = taxonomy.unwrap_or_else(|e| {
+        tracing::warn!("TaxonomyStore not loaded ({e}) — using mood+genre fallback titles");
+        TaxonomyStore::from_raw(vec![])
+    });
+    let mood_vault = Arc::new(MoodVault::new(mood_vectors.unwrap_or_else(|e| {
+        tracing::warn!("MoodVault not loaded ({e}) — row titles use era and genre only");
+        vec![]
+    })));
+
+    // Stage 2: what needs the catalog or the vectors. The corpus mean centres the taxonomy vectors (on the title profile mean when those vectors exist, a different text with a different mean).
+    let catalog_now = catalog.load();
+    let (mean, seeds, vault) = std::thread::scope(|s| {
+        let h_mean = s.spawn(|| Arc::new(vectors.compute_mean()));
+        let h_seeds = s.spawn(|| ClusterSeeds::load(&config.seeds_path, &config.seeds_legacy_path, &catalog_now));
+        let h_vault = s.spawn(|| CentroidVault::compute(&catalog_now, &vectors));
+        (joined(h_mean.join()), joined(h_seeds.join()), joined(h_vault.join()))
+    });
+    drop(catalog_now);
+    let (seeds, vault) = (seeds?, vault?);
+    // an index with fewer than 95 percent of the vectors is stale
+    let index = index.filter(|idx| {
+        let ok = idx.len() * 100 >= vectors.n_vecs * 95;
+        if !ok {
+            tracing::warn!("HNSW index is stale ({} of {} vectors) — rebuilding in background", idx.len(), vectors.n_vecs);
         }
+        ok
+    });
+    if let Some(t) = Arc::get_mut(&mut taxonomy) {
+        if profiles.mean.len() == crate::profiles::DIMS { t.center_with(&profiles.mean); } else { t.center_with(&mean); }
     }
 
-    if !ENGINE_READY.load(Ordering::Relaxed) {
+    // HNSW index: loaded from disk, or built in the background (brute force serves until it is ready)
+    let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
+    if let Some(idx) = index {
+        *hnsw_slot.write().await = Some(idx);
+        ENGINE_READY.store(true, Ordering::Relaxed);
+        info!("HNSW index loaded from disk");
+    } else {
         spawn_hnsw_build(hnsw_slot.clone(), vectors.clone(), config.index_path.clone(), stamp.clone());
     }
 
@@ -124,8 +143,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         if ENGINE_READY.load(Ordering::Relaxed) { "HNSW" } else { "brute-force" }
     );
 
-    let profile_dir = std::path::Path::new(&config.db_path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-    let profiles = Arc::new(profiles0);
+    let profiles = Arc::new(profiles);
     info!("Title profiles: {} ({} with vectors)", profiles.profiles.len(), profiles.vectors.len() / crate::profiles::DIMS);
 
     // The profile vectors cover the quality titles only, so a row definition finds its titles among them instead of among 650,000 mostly obscure ones.
@@ -134,12 +152,11 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         spawn_profile_index(profile_hnsw.clone(), profiles.clone(), format!("{profile_dir}/profile_vectors_v1.bin.hnsw"));
     }
 
-    let fresh_store = crate::fresh::FreshStore::load(&profile_dir);
     info!("Fresh titles: {} ({})", fresh_store.items.len(), fresh_store.generated);
     let fresh: crate::fresh::SharedFresh = Arc::new(arc_swap::ArcSwap::from_pointee(fresh_store));
     crate::fresh::spawn_refresh(fresh.clone(), profile_dir.clone());
 
-    let people = Arc::new(crate::people::PeopleIndex::load(&config.db_path));
+    let people = Arc::new(people);
     info!("People index: {} names", people.len());
 
     let config = Arc::new(config.clone());
@@ -150,7 +167,9 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         hnsw: hnsw_slot,
         profile_hnsw,
         seeds,
-        groups: Arc::new(crate::groups::load(&config.db_path)),
+        groups: Arc::new(groups_map.clone()),
+        group_names: Arc::new(group_names),
+        vibe: Arc::new(crate::vibe::load(&config.db_path, crate::groups::vibe_members(&groups_map))),
         vault,
         taxonomy,
         mood_vault,

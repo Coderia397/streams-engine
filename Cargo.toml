@@ -11,16 +11,8 @@ name = "streams-engine"
 path = "src/main.rs"
 
 [[bin]]
-name = "cluster-seeds"
-path = "src/bin/cluster_seeds.rs"
-
-[[bin]]
-name = "embed-taxonomy"
-path = "src/bin/embed_taxonomy.rs"
-
-[[bin]]
-name = "embed-catalog"
-path = "src/bin/embed_catalog.rs"
+name = "build-pointers"
+path = "src/bin/build_pointers.rs"
 
 [lib]
 name = "streams_engine"
@@ -61,7 +53,7 @@ anyhow           = "1"
 # Identity (Supabase access token verification, ES256)
 jsonwebtoken     = "9"
 
-# Data-prep tool deps (used by src/bin/* only, zero overhead in the engine hot path)
+# reqwest: token key fetch in identity.rs; clap: build-pointers
 reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 clap             = { version = "4", features = ["derive"] }
 

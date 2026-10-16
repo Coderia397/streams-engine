@@ -72,10 +72,6 @@ impl SessionState {
         self.version += 1;
     }
 
-    pub fn has_seen(&self, id: u32) -> bool {
-        self.seen.contains(&id)
-    }
-
     pub fn seen_ids(&self) -> &HashSet<u32> {
         &self.seen
     }
@@ -102,6 +98,12 @@ impl SessionState {
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Cache<String, Arc<Mutex<SessionState>>>,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStore {

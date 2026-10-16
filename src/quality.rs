@@ -17,18 +17,6 @@ pub fn bayesian_quality_score(vote_average: f32, popularity: f32) -> f32 {
         + 4.5 * (1.0 + popularity).ln()
 }
 
-/// Full anchor quality gate. Must pass ALL conditions.
-/// - vote_average >= 7.2
-/// - popularity >= 40.0
-/// - quality score >= 10.0
-/// - overview >= 80 chars (structural gate — eliminates news, sports, game shows)
-pub fn is_quality_anchor(item: &CatalogItem) -> bool {
-    item.vote_average >= 7.2
-        && item.popularity >= 40.0
-        && bayesian_quality_score(item.vote_average, item.popularity) >= 10.0
-        && item.overview_chars() >= 80
-}
-
 /// Popularity-adjusted score for ANN result reranking.
 /// Penalises extremely popular items to counter embedding-space density bias.
 /// The coefficient 0.08 is a tunable config — start here, adjust empirically.
@@ -46,4 +34,12 @@ pub fn item_quality(item: &CatalogItem) -> f32 {
     } else {
         bayesian_quality_score(item.vote_average, item.popularity)
     }
+}
+
+/// Sort items best quality first, ties by id (a page must not depend on the hash map order of the catalog). The score is computed once per item, not once per comparison.
+pub fn sort_by_quality(items: &mut Vec<&CatalogItem>) {
+    let mut keyed: Vec<(f32, &CatalogItem)> = items.iter().map(|i| (item_quality(i), *i)).collect();
+    keyed.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    items.clear();
+    items.extend(keyed.into_iter().map(|k| k.1));
 }

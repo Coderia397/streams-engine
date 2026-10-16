@@ -267,7 +267,7 @@ impl Identity {
     }
 
     fn keys_stale(&self) -> bool {
-        self.last_fetch.lock().unwrap().map_or(true, |t| t.elapsed() > JWKS_MAX_AGE)
+        self.last_fetch.lock().unwrap().is_none_or(|t| t.elapsed() > JWKS_MAX_AGE)
     }
 
     /// Verify the token and return the user id (`sub`).

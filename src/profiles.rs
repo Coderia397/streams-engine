@@ -35,7 +35,6 @@ pub struct TitleProfile {
     pub themes: Vec<String>,
     pub tone: Vec<String>,
     pub content: Vec<String>,
-    pub summary: String,
 }
 
 impl TitleProfile {
@@ -101,7 +100,6 @@ pub fn parse_profile(p: &Value) -> Option<TitleProfile> {
         themes: list(p.get("themes")),
         tone: list(p.get("tone")),
         content: list(p.get("content")),
-        summary: p.get("summary").and_then(Value::as_str).unwrap_or("").to_string(),
     })
 }
 
@@ -215,7 +213,7 @@ impl ProfileStore {
             return;
         }
         let mut mean = vec![0f64; DIMS];
-        for row in self.vectors.chunks_exact(DIMS) {
+        for row in self.vectors.as_chunks::<DIMS>().0.iter() {
             for (m, &b) in mean.iter_mut().zip(row) {
                 *m += f16::from_bits(b).to_f32() as f64;
             }

@@ -91,7 +91,7 @@ impl GenreSpec {
             ),
             BookAdaptations => kw_is(it, &["based on novel or book", "based on young adult novel"]),
             British => from_country(it, &["GB"]),
-            Classics => it.media_type == "movie" && it.release_year.map_or(false, |y| y <= 1979) && it.vote_average >= 7.0,
+            Classics => it.media_type == "movie" && it.release_year.is_some_and(|y| y <= 1979) && it.vote_average >= 7.0,
             Cult => kw_is(
                 it,
                 &["cult film", "cult classic", "cult", "midnight movie", "cult tv", "cult favorite", "grindhouse", "exploitation",

@@ -60,6 +60,10 @@ impl PeopleIndex {
         self.names.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
     /// Titles of the people the query names, most popular first. A query matches a person when the person's name is the query or starts with it
     /// (a single word must be a whole name, so a first name alone does not pull in everyone). The first element tells whether the query was an exact name.
     pub fn titles_for(&self, query: &str, limit: usize) -> (bool, Vec<u32>) {

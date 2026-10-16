@@ -62,10 +62,7 @@ pub fn load_mood_embeddings(path: &str) -> anyhow::Result<Vec<Vec<f32>>> {
     Ok((0..n)
         .map(|i| {
             let off = 4 + i * DIMS * 4;
-            let mut v: Vec<f32> = bytes[off..off + DIMS * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
+            let mut v: Vec<f32> = crate::vectors::le_f32s(&bytes[off..off + DIMS * 4]);
             l2_normalize(&mut v);
             v
         })

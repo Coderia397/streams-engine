@@ -1,4 +1,4 @@
-use crate::vectors::{cosine_sim, VectorStore, DIMS};
+use crate::vectors::{le_f32s, le_u32s, DIMS};
 use anyhow::{bail, Result};
 use std::sync::Arc;
 use tracing::info;
@@ -12,13 +12,16 @@ pub struct ClusterSeed {
     pub member_ids: Vec<u32>,
     /// Row title written for the group (from `<seeds>.names`, empty when absent)
     pub name: String,
+    /// World level 2 group this seed is (-1 when unknown), from `<seeds>.ids`
+    pub group: i32,
 }
 
 /// All cluster seeds loaded from `cluster_seeds.bin`.
 ///
 /// Binary format (produced by `tools/compute_cluster_seeds.py`):
 /// - 4 bytes: n_clusters (u32 LE)
-/// - 4 bytes: n_dims     (u32 LE, must be 2560)
+/// - 4 bytes: n_dims     (u32 LE, must be the vector dimension)
+///
 /// For each cluster:
 ///   - n_dims × 4 bytes: centroid f32 LE
 ///   - 4 bytes: n_members (u32 LE)
@@ -28,6 +31,7 @@ pub struct ClusterSeeds {
 }
 
 impl ClusterSeeds {
+
     /// Return an empty seed set (engine falls back to brute-force feed).
     pub fn empty() -> Arc<Self> {
         Arc::new(Self { seeds: vec![] })
@@ -67,20 +71,14 @@ impl ClusterSeeds {
 
         let mut seeds = Vec::with_capacity(n_clusters);
         for _ in 0..n_clusters {
-            let centroid: Vec<f32> = bytes[pos..pos + n_dims * 4]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
+            let centroid: Vec<f32> = le_f32s(&bytes[pos..pos + n_dims * 4]);
             pos += n_dims * 4;
 
             let n_members = read_u32!() as usize;
-            let member_ids: Vec<u32> = bytes[pos..pos + n_members * 4]
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
+            let member_ids: Vec<u32> = le_u32s(&bytes[pos..pos + n_members * 4]);
             pos += n_members * 4;
 
-            seeds.push(ClusterSeed { centroid, member_ids, name: String::new() });
+            seeds.push(ClusterSeed { centroid, member_ids, name: String::new(), group: -1 });
         }
 
         if legacy {
@@ -108,46 +106,13 @@ impl ClusterSeeds {
                 }
             }
         }
+        if let Ok(text) = std::fs::read_to_string(format!("{path}.ids")) {
+            if let Ok(ids) = serde_json::from_str::<Vec<i32>>(&text) {
+                if ids.len() == seeds.len() { for (s, g) in seeds.iter_mut().zip(ids) { s.group = g; } }
+            }
+        }
         info!("ClusterSeeds loaded: {} seeds", seeds.len());
         Ok(Arc::new(Self { seeds }))
     }
 
-    /// Select up to `n_select` maximally diverse seeds via greedy MMD
-    /// (Max-Min Dispersion). Any two selected seeds must have cosine ≤ max_sim.
-    /// Seeds whose dominant genre is in `blocked_genres` are skipped.
-    pub fn select_diverse(
-        &self,
-        n_select: usize,
-        max_inter_sim: f32,
-        blocked_genres: &[&str],
-        _vectors: &VectorStore,
-    ) -> Vec<&ClusterSeed> {
-        let mut selected: Vec<&ClusterSeed> = Vec::new();
-        let mut selected_centroids: Vec<&Vec<f32>> = Vec::new();
-
-        'outer: for seed in &self.seeds {
-            if selected.len() >= n_select {
-                break;
-            }
-
-            // Inter-anchor cosine gate: reject if too similar to any selected seed
-            for &prev in &selected_centroids {
-                if cosine_sim(&seed.centroid, prev) > max_inter_sim {
-                    continue 'outer;
-                }
-            }
-
-            // Genre bitmask: skip if dominant genre is recently placed
-            // (dominant genre inferred from majority vote of members)
-            // For performance: approximate via a lightweight text heuristic on
-            // the first few members' IDs. Full genre lookup happens in page.rs.
-            // Here we just pass through — page.rs does the genre bitmask check.
-            let _ = blocked_genres; // checked in page.rs after full item lookup
-
-            selected.push(seed);
-            selected_centroids.push(&seed.centroid);
-        }
-
-        selected
-    }
 }

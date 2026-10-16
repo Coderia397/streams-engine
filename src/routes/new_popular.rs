@@ -111,11 +111,11 @@ fn catalog_allowed(item: &CatalogItem, maturity: Option<Maturity>, profiles: &cr
     if item.adult || (crate::page::safety_nets() && item.flags & crate::catalog::FLAG_SUGGESTIVE != 0) {
         return false;
     }
-    maturity.map_or(true, |m| crate::page::maturity_allows_with(m, profiles, item))
+    maturity.is_none_or(|m| crate::page::maturity_allows_with(m, profiles, item))
 }
 
 fn fresh_only_allowed(f: &FreshItem, maturity: Option<Maturity>) -> bool {
-    !f.adult && maturity.map_or(true, |m| m == Maturity::Adult)
+    !f.adult && maturity.is_none_or(|m| m == Maturity::Adult)
 }
 
 /// All candidates: every fresh title, plus the catalog's own newest titles (release year this year or last) for rows that need no date.
@@ -133,10 +133,8 @@ fn candidates(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturit
         out.push(c);
     }
     for item in catalog.values() {
-        if item.release_year.map_or(false, |y| y >= year - 1 && y <= year) && crate::page::passes_member_quality(item) {
-            if seen.insert((item.media_type.clone(), item.tmdb_id)) {
-                out.push(from_catalog(item, catalog_allowed(item, maturity, profiles)));
-            }
+        if item.release_year.is_some_and(|y| y >= year - 1 && y <= year) && crate::page::passes_member_quality(item) && seen.insert((item.media_type.clone(), item.tmdb_id)) {
+            out.push(from_catalog(item, catalog_allowed(item, maturity, profiles)));
         }
     }
     out
@@ -179,7 +177,7 @@ fn chart(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, p
     let mut items: Vec<&CatalogItem> = catalog
         .values()
         .filter(|i| i.media_type == media_type && crate::page::chart_ok(i) && catalog_allowed(i, maturity, profiles))
-        .filter(|i| i.release_year.map_or(true, |y| y <= year) && !fresh.is_upcoming(&i.media_type, i.tmdb_id, today))
+        .filter(|i| i.release_year.is_none_or(|y| y <= year) && !fresh.is_upcoming(&i.media_type, i.tmdb_id, today))
         .collect();
     items.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
     items.truncate(10);
@@ -237,14 +235,14 @@ pub async fn new_popular(
                 }
                 "just_landed" => {
                     // the most popular titles of the last 30 days, newest first
-                    let v: Vec<&Cand> = pool.iter().copied().filter(|c| has_backdrop(c) && c.released(&today) && c.days_since(today_n).map_or(false, |d| d <= 30)).collect();
+                    let v: Vec<&Cand> = pool.iter().copied().filter(|c| has_backdrop(c) && c.released(&today) && c.days_since(today_n).is_some_and(|d| d <= 30)).collect();
                     let mut top = take_top(v, limit);
                     top.sort_by(|a, b| b.release_date.cmp(&a.release_date).then_with(|| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal)));
                     top
                 }
                 "coming_soon" => {
                     // the most anticipated titles of the next 90 days, soonest first
-                    let v: Vec<&Cand> = pool.iter().copied().filter(|c| has_art(c) && c.upcoming(&today) && c.days_since(today_n).map_or(false, |d| d >= -90)).collect();
+                    let v: Vec<&Cand> = pool.iter().copied().filter(|c| has_art(c) && c.upcoming(&today) && c.days_since(today_n).is_some_and(|d| d >= -90)).collect();
                     let mut top = take_top(v, limit);
                     top.sort_by(|a, b| a.release_date.cmp(&b.release_date).then_with(|| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal)));
                     top
@@ -297,7 +295,7 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     let mut rows: Vec<RowOut> = Vec::new();
     // rows are cut to `limit` after titles shared with an earlier row are removed, so each starts from a wider list
     let wide = limit * 4;
-    let recent = |c: &&Cand, days: i64| c.released(today) && c.days_since(today_n).map_or(false, |d| d <= days);
+    let recent = |c: &&Cand, days: i64| c.released(today) && c.days_since(today_n).is_some_and(|d| d <= days);
 
     rows.push(RowOut { title: "Top 10 Movies Today".into(), row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "movie", today, year) });
     rows.push(RowOut { title: "Top 10 Series Today".into(), row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "tv", today, year) });
@@ -313,14 +311,14 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     let episodes: Vec<&Cand> = pool.iter().copied().filter(|c| c.media_type == "tv" && (c.in_list("airing_today") || c.in_list("on_the_air")) && c.vote_average >= 6.0 && !matches!(c.tv_type.as_deref(), Some("Talk Show") | Some("News") | Some("Soap"))).collect();
     rows.push(RowOut { title: "New Episodes This Week".into(), row_type: "vibe", kind: "new", items: take_top(episodes, wide) });
 
-    let mut soon_movies: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "movie" && c.upcoming(today) && c.days_since(today_n).map_or(false, |d| d >= -120)).collect(), wide);
+    let mut soon_movies: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "movie" && c.upcoming(today) && c.days_since(today_n).is_some_and(|d| d >= -120)).collect(), wide);
     soon_movies.sort_by(|a, b| a.release_date.cmp(&b.release_date));
     rows.push(RowOut { title: "Coming Soon to Cinemas".into(), row_type: "vibe", kind: "soon", items: soon_movies });
 
     let acclaimed: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 270) && c.vote_count >= 100 && c.vote_average >= 7.2).collect();
     rows.push(RowOut { title: "New and Acclaimed".into(), row_type: "vibe", kind: "new", items: take_top(acclaimed, wide) });
 
-    let mut soon_tv: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "tv" && c.upcoming(today) && c.days_since(today_n).map_or(false, |d| d >= -150)).collect(), wide);
+    let mut soon_tv: Vec<Cand> = take_top(pool.iter().copied().filter(|c| c.media_type == "tv" && c.upcoming(today) && c.days_since(today_n).is_some_and(|d| d >= -150)).collect(), wide);
     soon_tv.sort_by(|a, b| a.release_date.cmp(&b.release_date));
     rows.push(RowOut { title: "Coming Soon: Series".into(), row_type: "vibe", kind: "soon", items: soon_tv });
 
@@ -363,7 +361,7 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     let gems: Vec<&Cand> = pool
         .iter()
         .copied()
-        .filter(|c| c.in_catalog && !c.upcoming(today) && c.release_year.map_or(false, |y| y >= year - 1) && c.vote_average >= 7.3 && c.vote_count >= 100 && c.popularity < 60.0 && c.popularity >= 6.0)
+        .filter(|c| c.in_catalog && !c.upcoming(today) && c.release_year.is_some_and(|y| y >= year - 1) && c.vote_average >= 7.3 && c.vote_count >= 100 && c.popularity < 60.0 && c.popularity >= 6.0)
         .collect();
     rows.push(RowOut { title: "Under the Radar".into(), row_type: "vibe", kind: "gems", items: take_top(gems, wide) });
     rows

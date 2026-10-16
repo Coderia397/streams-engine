@@ -37,13 +37,9 @@ impl VectorStore {
 
         // f32 file: convert to f16. f16 file: copy as is (the engine only ever uses f16).
         let data: Vec<f16> = if half {
-            mmap.chunks_exact(2)
-                .map(|c| f16::from_le_bytes(c.try_into().unwrap()))
-                .collect()
+            f16_from_le_bytes(&mmap)
         } else {
-            mmap.chunks_exact(4)
-                .map(|c| f16::from_f32(f32::from_le_bytes(c.try_into().unwrap())))
-                .collect()
+            le_f32s(&mmap).into_iter().map(f16::from_f32).collect()
         };
 
         let ids = resolve_ids(vectors_bin, catalog_db, n)?;
@@ -61,13 +57,16 @@ impl VectorStore {
         Ok(Arc::new(Self { data, ids, id_to_idx, n_vecs: n }))
     }
 
+    /// The stored f16 row of vector `i`.
+    #[inline]
+    pub fn row(&self, i: usize) -> &[f16] {
+        &self.data[i * DIMS..(i + 1) * DIMS]
+    }
+
     /// Get the f32 vector for row index `i`.
     #[inline]
     pub fn get_f32(&self, i: usize) -> Vec<f32> {
-        self.data[i * DIMS..(i + 1) * DIMS]
-            .iter()
-            .map(|x| x.to_f32())
-            .collect()
+        self.row(i).iter().map(|x| x.to_f32()).collect()
     }
 
     /// O(1) lookup: catalog ID → row index.
@@ -103,10 +102,39 @@ pub fn detect_layout(vectors_bin: &str, file_len: usize) -> Result<(usize, bool)
             return Ok((k, true));
         }
     }
-    if file_len % (DIMS * 4) != 0 {
+    if !file_len.is_multiple_of(DIMS * 4) {
         bail!("vectors file size {file_len} is neither f32 ({DIMS}×4 per row) nor f16 matching the .keys sidecar");
     }
     Ok((file_len / (DIMS * 4), false))
+}
+
+/// The f16 values of a little endian byte slice (length a multiple of 2): one copy on little endian machines, element by element otherwise.
+fn f16_from_le_bytes(bytes: &[u8]) -> Vec<f16> {
+    #[cfg(target_endian = "little")]
+    {
+        let n = bytes.len() / 2;
+        let mut out: Vec<f16> = Vec::with_capacity(n);
+        // SAFETY: `out` has room for n f16 (2 bytes each), f16 has no invalid bit patterns, and the regions do not overlap
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, n * 2);
+            out.set_len(n);
+        }
+        out
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        bytes.as_chunks::<2>().0.iter().map(|c| f16::from_le_bytes(*c)).collect()
+    }
+}
+
+/// Little endian f32 values of a byte slice (length a multiple of 4).
+pub fn le_f32s(bytes: &[u8]) -> Vec<f32> {
+    bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
+}
+
+/// Little endian u32 values of a byte slice (length a multiple of 4).
+pub fn le_u32s(bytes: &[u8]) -> Vec<u32> {
+    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
 }
 
 /// Row-order keys for vectors.bin (`catalog::item_key`, unique across movies and TV).
@@ -123,7 +151,7 @@ pub fn resolve_ids(vectors_bin: &str, catalog_db: &str, n: usize) -> Result<Vec<
     if let Ok(bytes) = std::fs::read(&keys_path) {
         if bytes.len() == n * 4 {
             info!("Vector keys read from {keys_path}");
-            return Ok(bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect());
+            return Ok(le_u32s(&bytes));
         }
         tracing::warn!("{keys_path} has {} keys, vectors.bin has {n} — ignoring it", bytes.len() / 4);
     }
@@ -148,9 +176,8 @@ pub fn resolve_ids(vectors_bin: &str, catalog_db: &str, n: usize) -> Result<Vec<
             .filter_map(|r| r.ok())
             .collect();
         let mut missing = 0usize;
-        let keys: Vec<u32> = raw
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        let keys: Vec<u32> = le_u32s(&raw)
+            .into_iter()
             .map(|id| *by_raw.get(&id).unwrap_or_else(|| { missing += 1; &id }))
             .collect();
         if missing > 0 {
@@ -237,7 +264,7 @@ pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// L2-normalise a vector in-place.
-pub fn l2_normalize(v: &mut Vec<f32>) {
+pub fn l2_normalize(v: &mut [f32]) {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 1e-8 {
         v.iter_mut().for_each(|x| *x /= norm);

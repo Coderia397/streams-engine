@@ -1,6 +1,6 @@
 use crate::catalog::CatalogMap;
 use crate::quality::bayesian_quality_score;
-use crate::vectors::{cosine_sim, l2_normalize, VectorStore, DIMS};
+use crate::vectors::{l2_normalize, VectorStore, DIMS};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,41 +37,61 @@ impl CentroidVault {
     ///
     /// Takes ~280ms at 100k catalog, single SQL pass already loaded in memory.
     pub fn compute(catalog: &CatalogMap, vectors: &VectorStore) -> Result<Arc<Self>> {
-        let mut accum: HashMap<String, Vec<f32>> = HashMap::new();
-        let mut counts: HashMap<String, usize> = HashMap::new();
-
-        // Initialise accumulators
-        for &label in GENRE_LABELS {
-            accum.insert(label.to_string(), vec![0.0f32; DIMS]);
-        }
-
-        // Accumulate weighted vectors for top-quality items
-        for (catalog_id, item) in catalog.iter() {
-            let score = bayesian_quality_score(item.vote_average, item.popularity);
-            if score < 8.0 {
-                continue; // only high-quality items define genre centroids
-            }
-
-            let Some(idx) = vectors.index_of(*catalog_id) else { continue };
-            let vec = vectors.get_f32(idx);
-
-            for genre in &item.genres {
-                if let Some(acc) = accum.get_mut(genre.as_str()) {
-                    for (a, v) in acc.iter_mut().zip(vec.iter()) {
-                        *a += score * v;
-                    }
-                    *counts.entry(genre.clone()).or_insert(0) += 1;
+        use rayon::prelude::*;
+        // the top-quality items with a vector: (row, score, indices into GENRE_LABELS)
+        let eligible: Vec<(usize, f32, Vec<usize>)> = catalog
+            .iter()
+            .filter_map(|(catalog_id, item)| {
+                let score = bayesian_quality_score(item.vote_average, item.popularity);
+                if score < 8.0 {
+                    return None; // only high-quality items define genre centroids
                 }
-            }
-        }
+                let genres: Vec<usize> = item.genres.iter().filter_map(|g| GENRE_LABELS.iter().position(|l| *l == g.as_str())).collect();
+                if genres.is_empty() {
+                    return None;
+                }
+                Some((vectors.index_of(*catalog_id)?, score, genres))
+            })
+            .collect();
+        let g = GENRE_LABELS.len();
+        // weighted sums per genre, accumulated in parallel over the f16 rows without materialising them
+        let (mut sums, counts) = eligible
+            .par_iter()
+            .fold(
+                || (vec![vec![0.0f32; DIMS]; g], vec![0usize; g]),
+                |(mut sums, mut counts), (idx, score, genres)| {
+                    let row = vectors.row(*idx);
+                    for &gi in genres {
+                        for (a, v) in sums[gi].iter_mut().zip(row) {
+                            *a += score * v.to_f32();
+                        }
+                        counts[gi] += 1;
+                    }
+                    (sums, counts)
+                },
+            )
+            .reduce(
+                || (vec![vec![0.0f32; DIMS]; g], vec![0usize; g]),
+                |(mut sa, mut ca), (sb, cb)| {
+                    for (a, b) in sa.iter_mut().zip(sb) {
+                        for (x, y) in a.iter_mut().zip(b) {
+                            *x += y;
+                        }
+                    }
+                    for (x, y) in ca.iter_mut().zip(cb) {
+                        *x += y;
+                    }
+                    (sa, ca)
+                },
+            );
 
         // Normalise each centroid to unit sphere
         let mut centroids = HashMap::new();
-        for (label, mut vec) in accum {
-            let n = *counts.get(&label).unwrap_or(&0);
-            if n > 0 {
+        for (gi, label) in GENRE_LABELS.iter().enumerate() {
+            if counts[gi] > 0 {
+                let mut vec = std::mem::take(&mut sums[gi]);
                 l2_normalize(&mut vec);
-                centroids.insert(label, vec);
+                centroids.insert(label.to_string(), vec);
             }
         }
 
@@ -80,28 +100,6 @@ impl CentroidVault {
             centroids.len()
         );
         Ok(Arc::new(Self { centroids }))
-    }
-
-    /// Find the genre name whose centroid is closest (cosine) to the given vector.
-    pub fn closest_genre(&self, vec: &[f32]) -> &str {
-        self.centroids
-            .iter()
-            .max_by(|(_, a), (_, b)| {
-                cosine_sim(a, vec)
-                    .partial_cmp(&cosine_sim(b, vec))
-                    .unwrap()
-            })
-            .map(|(k, _)| k.as_str())
-            .unwrap_or("Drama")
-    }
-
-    /// Max cosine similarity to ANY centroid. Used as domain gate:
-    /// if max_sim < 0.55, the item is in noise space (news, reality, game shows).
-    pub fn max_domain_sim(&self, vec: &[f32]) -> f32 {
-        self.centroids
-            .values()
-            .map(|c| cosine_sim(c, vec))
-            .fold(f32::NEG_INFINITY, f32::max)
     }
 
     /// Build a taste-query vector from a sparse genre-affinity map.
@@ -120,8 +118,4 @@ impl CentroidVault {
         result
     }
 
-    /// Get centroid for a specific genre (for BYW anchor check).
-    pub fn get(&self, genre: &str) -> Option<&Vec<f32>> {
-        self.centroids.get(genre)
-    }
 }

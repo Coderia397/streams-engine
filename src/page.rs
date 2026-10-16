@@ -65,6 +65,18 @@ const MEMBER_POOL: usize = 120;
 
 /// Items per row (max)
 const ROW_SIZE: usize = 15;
+/// A genre page built from groups: the (level, id) of each cluster and the item indices kept
+type GroupMode = (Vec<(u8, i32)>, Vec<usize>);
+/// The titles of one group, by group id
+type GroupItems = (i32, Vec<usize>);
+/// An item index with its score
+type ScoredIdx = (usize, f32);
+/// A seasonal sub group is shown only when at least this share of its titles carry the event keywords (the rest joined the pool by similarity and drift)
+const SEASON_MIN_KW_SHARE: f32 = 0.4;
+/// Mean centred cosine of a seasonal sub group's best 15 titles to the event vector below which the sub group is not shown
+const SEASON_MIN_FIT: f32 = 0.18;
+/// Events whose pool is defined by precise catalog keywords (identity, heritage and family days): their sub groups are ranked by fit but not dropped for a low fit
+const KEYWORD_EVENTS: &[&str] = &["pride", "black_history", "womens_history", "awards", "mothers_day", "fathers_day", "cinco_de_mayo", "st_patricks", "july4", "ramadan_eid", "independence_india", "hanukkah", "diwali", "easter", "lunar_new_year"];
 
 /// ANN top-k for HNSW retrieval
 const ANN_K: usize = 200;
@@ -89,6 +101,12 @@ pub struct PageState {
     pub used_ids: HashSet<u32>,
     /// Documentary and reality rows placed so far
     pub nonscripted_rows: u32,
+}
+
+impl Default for PageState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PageState {
@@ -128,7 +146,7 @@ impl PageState {
                 _ => t.to_lowercase(),
             }
         };
-        let clamped: Vec<String> = candidates.iter().map(|t| clamp_words(t, 4)).collect();
+        let clamped: Vec<String> = candidates.iter().map(|t| clamp_words(t, 6)).collect();
         let chosen = clamped
             .iter()
             .find(|t| !t.is_empty() && !self.used_titles.contains(&canon(t)))
@@ -211,6 +229,13 @@ pub struct PageContext<'a> {
     /// Index over the title profile vectors; row definitions are matched against it when it is built
     pub profile_hnsw: &'a RwLock<Option<HnswIndex>>,
     pub seeds:       &'a ClusterSeeds,
+    /// World, atom and theme group of every title (single database)
+    pub groups:      &'a crate::groups::GroupMap,
+    pub group_names: &'a crate::groups::GroupNames,
+    /// Vibe groups, moods and seasonal sub groups
+    pub vibe:        &'a crate::vibe::VibeIndex,
+    /// The client's local time is between 22:00 and 04:59: late night rows come first
+    pub late_night:  bool,
     pub vault:       &'a CentroidVault,
     pub taxonomy:    &'a TaxonomyStore,
     pub mood_vault:  &'a MoodVault,
@@ -274,7 +299,7 @@ pub fn maturity_allows_with(m: crate::identity::Maturity, profiles: &crate::prof
 /// limited by their maturity instead, and pages about kids, family, animation or anime keep them.
 pub fn audience_fits_with(spec: Option<&crate::genre_spec::GenreSpec>, maturity: Option<crate::identity::Maturity>, profiles: &crate::profiles::ProfileStore, item: &CatalogItem) -> bool {
     let Some(spec) = spec else { return true };
-    if spec.keeps_children() || maturity.map_or(false, |m| m.is_kids()) {
+    if spec.keeps_children() || maturity.is_some_and(|m| m.is_kids()) {
         return true;
     }
     if item.cert != 0 {
@@ -289,10 +314,10 @@ pub fn audience_fits_with(spec: Option<&crate::genre_spec::GenreSpec>, maturity:
 impl<'a> PageContext<'a> {
     fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
-            && self.language.map_or(true, |l| language_matches(l, &item.original_language))
+            && self.language.is_none_or(|l| language_matches(l, &item.original_language))
             && self.genre_ok(item)
             && self.audience_fits(item)
-            && self.maturity.map_or(true, |m| self.maturity_allows(m, item))
+            && self.maturity.is_none_or(|m| self.maturity_allows(m, item))
             && (!safety_nets() || self.allowed_by_nets(item))
     }
 
@@ -318,14 +343,14 @@ impl<'a> PageContext<'a> {
     /// appear inside their window (the Halloween page lifts the Halloween rule).
     fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
         use crate::catalog::{FLAG_CHRISTMAS, FLAG_HALLOWEEN, FLAG_NONSCRIPTED, FLAG_SUGGESTIVE, FLAG_WRESTLING_EVENT};
-        let f = item.flags;
+        let f = item.flags & crate::catalog::FLAGS_RULES;
         if f == 0 {
             return true;
         }
         if f & FLAG_SUGGESTIVE != 0 {
             return false;
         }
-        if f & FLAG_NONSCRIPTED != 0 && !self.genre_spec.map_or(false, |s| s.includes_nonscripted()) {
+        if f & FLAG_NONSCRIPTED != 0 && !self.genre_spec.is_some_and(|s| s.includes_nonscripted()) {
             return false;
         }
         // pay per view wrestling events are not default home content (the Sports page keeps them)
@@ -338,7 +363,7 @@ impl<'a> PageContext<'a> {
             return false;
         }
         let halloween_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Halloween));
-        if f & FLAG_HALLOWEEN != 0 && !halloween_page && !(md >= 1001 && md <= 1101) {
+        if f & FLAG_HALLOWEEN != 0 && !halloween_page && !(1001..=1101).contains(&md) {
             return false;
         }
         true
@@ -408,10 +433,24 @@ impl<'a> PageContext<'a> {
         if self.genre.is_none() && self.language.is_none() && self.animation.is_none() && !kids && !self.taxonomy.entries.is_empty() {
             let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
             let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-            for (n, row) in self.build_seasonal_rows(&used).await.into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).enumerate() {
-                let at = (if n == 0 { 2 } else { 5 }).min(rows.len());
+            // sub groups of the season's pool when they exist, the flat keyword rows otherwise
+            let seasonal = { let sub = self.build_seasonal_sub_rows(&used); if sub.is_empty() { self.build_seasonal_rows(&used).await } else { sub } };
+            for (n, row) in seasonal.into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).enumerate() {
+                let at = (if n == 0 { 2 } else { 5 + n }).min(rows.len());
                 rows.insert(at, row);
             }
+        }
+        // late night moods lead a night page, vibe rows (how the titles feel) are mixed in on every page that is not a children's or a language page
+        if !kids && self.language.is_none() && self.animation.is_none() {
+            let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let mut extra: Vec<Row> = Vec::new();
+            if self.late_night && self.genre.is_none() { extra.extend(self.build_mood_rows(&used, 2, true)); }
+            let mut taken = used.clone(); extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken.insert(i.id); }));
+            let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+            let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
+            let night = extra.len();
+            rows = self.interleave(rows, extra, 1);
+            rows = self.interleave(rows, vibes, 3 + night);
         }
         rows
     }
@@ -437,7 +476,7 @@ impl<'a> PageContext<'a> {
             .enumerate()
             .filter(|(_, e)| {
                 e.kind == "calendar"
-                    && e.season.map_or(false, |s| s.active_on(self.today))
+                    && e.season.is_some_and(|s| s.active_on(self.today))
                     && (e.media_type == "both" || e.media_type == self.surface || self.surface == "both")
                     && !entry_names_other_kind(&e.title, self.surface)
                     && !e.centered.is_empty()
@@ -462,7 +501,7 @@ impl<'a> PageContext<'a> {
                 } else {
                     !e.keywords.is_empty() && item.keywords.iter().any(|k| e.keywords.iter().any(|w| w == k))
                 };
-                if !in_season || taken.contains(&item.id) || !self.matches_filters(item) || !passes_member_quality(item) || !self.reliable(item) {
+                if !in_season || taken.contains(&item.id) || !passes_member_quality(item) || !self.reliable(item) || !self.matches_filters(item) {
                     continue;
                 }
                 let sim = self.season_vector(item.id).map(|v| cosine_sim(&v, &e.embedding)).unwrap_or(0.0);
@@ -542,7 +581,7 @@ impl<'a> PageContext<'a> {
         let t_seed_loop = std::time::Instant::now();
         let (mut n_visit, mut n_similar, mut n_empty, mut n_genre, mut n_mmr, mut n_items, mut n_row) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         for (_, seed_idx) in &scored_seeds {
-            if rows.len() >= self.target_rows + 1 {
+            if rows.len() > self.target_rows {
                 break; // +1 for trending row
             }
 
@@ -591,11 +630,7 @@ impl<'a> PageContext<'a> {
             }
 
             // Best quality members only, then fetch their vectors
-            cand_items.sort_unstable_by(|a, b| {
-                crate::quality::item_quality(b)
-                    .partial_cmp(&crate::quality::item_quality(a))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            crate::quality::sort_by_quality(&mut cand_items);
             cand_items.truncate(MEMBER_POOL);
             if !self.session.is_empty() && safety_nets() && cand_items.len() > 60 {
                 let kept: Vec<&CatalogItem> = cand_items
@@ -736,7 +771,7 @@ impl<'a> PageContext<'a> {
             let mut candidates = if has_taxonomy && !derived.is_empty() { vec![derived.remove(0)] } else { Vec::new() };
             // the name written for the group comes first; the titles derived from the displayed items follow as fallbacks
             if let Some(seed) = thematic_seed_idx.get(ti).and_then(|i| self.seeds.seeds.get(*i)) {
-                if !seed.name.is_empty() && crate::row_label::name_fits(&seed.name, &row_catalog) { candidates.insert(0, seed.name.clone()); }
+                if !seed.name.is_empty() && crate::row_label::name_fits(&seed.name, &row_catalog) && !entry_names_other_kind(&seed.name, self.surface) { candidates.insert(0, seed.name.clone()); }
             }
             candidates.extend(crate::row_label::candidates(&row_catalog));
             candidates.extend(derived);
@@ -797,9 +832,9 @@ impl<'a> PageContext<'a> {
                 (e.media_type == "both" || e.media_type == self.surface || self.surface == "both")
                     // a row for "both" that names the other kind (a films row on the series page) stays off this page
                     && !entry_names_other_kind(&e.title, self.surface)
-                    && e.season.map_or(true, |s| s.active_on(self.today))
+                    && e.season.is_none_or(|s| s.active_on(self.today))
                     && !e.centered.is_empty()
-                    && self.taxonomy.support_for(*i, self.surface).map_or(true, |n| n >= MIN_SUPPORT)
+                    && self.taxonomy.support_for(*i, self.surface).is_none_or(|n| n >= MIN_SUPPORT)
             })
             .map(|(i, e)| {
                 let prior = 0.25 * kind_weight(&e.kind);
@@ -895,10 +930,10 @@ impl<'a> PageContext<'a> {
                 }
                 let base = if exploiting { c.exploit } else { c.explore };
                 let value = base - MU * max_sim[ci].max(0.0);
-                if relaxed.map_or(true, |(_, v)| value > v) {
+                if relaxed.is_none_or(|(_, v)| value > v) {
                     relaxed = Some((ci, value));
                 }
-                if (e.kind != last_kind || e.kind.is_empty()) && best.map_or(true, |(_, v)| value > v) {
+                if (e.kind != last_kind || e.kind.is_empty()) && best.is_none_or(|(_, v)| value > v) {
                     best = Some((ci, value));
                 }
             }
@@ -1000,11 +1035,214 @@ impl<'a> PageContext<'a> {
         rows
     }
 
-    // ── Genre pages ───────────────────────────────────────────────────────────
+    // ── Vibe, mood and seasonal rows (notes/52) ───────────────────────────────
 
-    /// Rows for a genre filtered page. The global seeds hold too few titles of any
-    /// single genre, so cluster the genre's own best titles on the fly instead
-    /// (farthest first init, a few Lloyd rounds) to get sub-topics inside the genre.
+    /// Filters of the page without its genre rule (a seasonal page holds titles that are near the season without carrying its keyword).
+    fn matches_filters_any_genre(&self, item: &CatalogItem) -> bool {
+        (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
+            && self.language.is_none_or(|l| language_matches(l, &item.original_language))
+            && self.audience_fits(item)
+            && self.maturity.is_none_or(|m| self.maturity_allows(m, item))
+            && (!safety_nets() || self.allowed_by_nets(item))
+    }
+
+    /// The titles of a list of keys that this page may show, best quality first; `any_genre` skips the page's genre rule.
+    fn eligible(&self, keys: &[u32], taken: &HashSet<u32>, any_genre: bool) -> Vec<&CatalogItem> {
+        let mut v: Vec<&CatalogItem> = keys
+            .iter()
+            .filter_map(|k| self.catalog.get(k))
+            .filter(|i| !taken.contains(&i.id) && (if any_genre { self.matches_filters_any_genre(i) } else { self.matches_filters(i) }) && passes_member_quality(i) && self.reliable(i))
+            .collect();
+        crate::quality::sort_by_quality(&mut v);
+        v
+    }
+
+    fn row_of(&self, title: &str, kind: &str, items: &[&CatalogItem]) -> Option<Row> {
+        let ids: Vec<u32> = items.iter().take(60).map(|i| i.id).collect();
+        let row_items = self.diverse_titles(&ids, ROW_SIZE);
+        if row_items.len() < COHERENCE_MIN_ITEMS { return None; }
+        Some(Row { title: title.to_string(), archetype: "thematic".to_string(), kind: kind.to_string(), items: row_items })
+    }
+
+    /// A vibe name is shown only when it keeps its promise for the titles of the row and does not name the other kind of title (Series on a films page).
+    fn vibe_name_ok(&self, name: &str, items: &[&CatalogItem]) -> bool {
+        crate::row_label::name_fits(name, items) && !entry_names_other_kind(name, self.surface)
+    }
+
+    /// Up to `want` rows of titles that reviewers describe alike (vibe groups), chosen per session, in the page's genre when it has one.
+    fn build_vibe_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
+        if want == 0 || self.vibe.members.is_empty() { return Vec::new(); }
+        let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
+        let mut groups: Vec<i32> = self.vibe.members.keys().copied().collect();
+        groups.sort_unstable();
+        // a session sees a stable choice: groups are ordered by a session dependent noise and the first ones that qualify are scored
+        groups.sort_by(|a, b| entry_noise(self.session, *b as usize).partial_cmp(&entry_noise(self.session, *a as usize)).unwrap_or(std::cmp::Ordering::Equal));
+        let mut scored: Vec<(f32, String, Vec<&CatalogItem>)> = Vec::new();
+        for g in groups.into_iter().take(500) {
+            let Some(name) = self.group_names.get(&(5, g)) else { continue };
+            let items = self.eligible(&self.vibe.members[&g], taken, false);
+            if items.len() < 10 || !self.vibe_name_ok(name, &items) { continue; }
+            let mass: f32 = items.iter().take(15).map(|i| crate::quality::item_quality(i)).sum::<f32>() / 15.0;
+            let score = if has_taste {
+                let mut c = vec![0.0f32; DIMS];
+                for it in items.iter().take(10) { if let Some(ix) = self.vectors.index_of(it.id) { for (a, x) in c.iter_mut().zip(self.vectors.get_f32(ix)) { *a += x; } } }
+                l2_normalize(&mut c);
+                cosine_sim(&self.taste, &c)
+            } else { mass * (0.7 + 0.6 * entry_noise(self.session, g as usize + 7)) };
+            scored.push((score, name.clone(), items));
+            if scored.len() >= want * 6 { break; }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut rows: Vec<Row> = Vec::new(); let mut used: HashSet<u32> = taken.clone(); let mut names: HashSet<String> = HashSet::new();
+        for (_, name, items) in scored {
+            if rows.len() >= want { break; }
+            if !names.insert(name.to_lowercase()) { continue; }
+            let fresh: Vec<&CatalogItem> = items.into_iter().filter(|i| !used.contains(&i.id)).collect();
+            if let Some(r) = self.row_of(&name, "vibe", &fresh) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
+        }
+        rows
+    }
+
+    /// Mood rows (late night, cozy, mind-bending ...): the titles of the vibe groups that fit the mood best. On a late night page the late night moods come first.
+    fn build_mood_rows(&self, taken: &HashSet<u32>, want: usize, late_only: bool) -> Vec<Row> {
+        if want == 0 || self.vibe.moods.is_empty() { return Vec::new(); }
+        let mut moods: Vec<&crate::vibe::Mood> = self.vibe.moods.iter().filter(|m| !late_only || m.late).collect();
+        moods.sort_by(|a, b| entry_noise(self.session, b.id.len() + b.title.len()).partial_cmp(&entry_noise(self.session, a.id.len() + a.title.len())).unwrap_or(std::cmp::Ordering::Equal));
+        if self.late_night && !late_only { moods.sort_by_key(|m| !m.late); }
+        let mut rows: Vec<Row> = Vec::new(); let mut used: HashSet<u32> = taken.clone();
+        for m in moods {
+            if rows.len() >= want { break; }
+            let mut cand: Vec<(f32, &CatalogItem)> = Vec::new(); let mut seen: HashSet<u32> = HashSet::new();
+            // the phrase vector, centred like the title vectors; a title is ranked by its own fit to the phrase as well as by the review match of its vibe group
+            let mv: Option<Vec<f32>> = (m.vector.len() == DIMS).then(|| { let mut c: Vec<f32> = m.vector.iter().zip(self.mean).map(|(x, mu)| x - mu).collect(); l2_normalize(&mut c); c });
+            for (g, score) in m.groups.iter().take(6) {
+                if let Some(keys) = self.vibe.members.get(g) {
+                    for it in self.eligible(keys, &used, false).into_iter().take(60) {
+                        if !seen.insert(it.id) { continue; }
+                        let fit = match &mv {
+                            Some(v) => {
+                                let Some(ix) = self.vectors.index_of(it.id) else { continue };
+                                if self.vectors.is_zero_row(ix) { continue; }
+                                let mut c: Vec<f32> = self.vectors.get_f32(ix).iter().zip(self.mean).map(|(x, mu)| x - mu).collect();
+                                l2_normalize(&mut c);
+                                cosine_sim(&c, v)
+                            }
+                            None => 0.0,
+                        };
+                        cand.push((fit + 0.5 * *score + 0.1 * (crate::quality::item_quality(it) / 35.0).min(1.5), it));
+                    }
+                }
+            }
+            cand.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+            let items: Vec<&CatalogItem> = cand.into_iter().map(|c| c.1).collect();
+            if items.len() < 12 { continue; }
+            if let Some(r) = self.row_of(&m.title, "mood", &items) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
+        }
+        rows
+    }
+
+    /// The centred vector of an event: the mean of the centred vectors of its calendar entries (Halloween: Spooky Mystery Films, Gothic Thrillers ...); None when the vocabulary has none.
+    fn event_vector(&self, event: &str) -> Option<Vec<f32>> {
+        let mut sum = vec![0.0f32; DIMS]; let mut n = 0;
+        for e in self.taxonomy.entries.iter().filter(|e| e.kind == "calendar" && e.event == event && e.centered.len() == DIMS) {
+            for (a, x) in sum.iter_mut().zip(&e.centered) { *a += x; }
+            n += 1;
+        }
+        if n == 0 { return None; }
+        l2_normalize(&mut sum);
+        Some(sum)
+    }
+
+    /// Items of a seasonal sub group ordered by how well they fit the event (centred cosine to the event vector, plus a small quality term), the ones that do not fit left out.
+    /// A sub group whose best titles fit weakly is dropped (an empty list).
+    fn season_fit<'b>(&self, event: &str, items: Vec<&'b CatalogItem>) -> Vec<&'b CatalogItem> {
+        let Some(ev) = self.event_vector(event) else { return items };
+        let mut scored: Vec<(f32, &CatalogItem)> = items
+            .into_iter()
+            .filter_map(|it| {
+                let ix = self.vectors.index_of(it.id)?;
+                if self.vectors.is_zero_row(ix) { return None; }
+                let mut c: Vec<f32> = self.vectors.get_f32(ix).iter().zip(self.mean).map(|(x, m)| x - m).collect();
+                l2_normalize(&mut c);
+                Some((cosine_sim(&c, &ev), it))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+        let top: Vec<f32> = scored.iter().take(15).map(|s| s.0).collect();
+        if top.len() < 8 { return Vec::new(); }
+        let mean_top = top.iter().sum::<f32>() / top.len() as f32;
+        tracing::debug!("season fit {event}: top {mean_top:.3}, best {:.3}", top[0]);
+        let floor = if KEYWORD_EVENTS.contains(&event) { f32::MIN } else { SEASON_MIN_FIT };
+        if mean_top < floor { return Vec::new(); }
+        scored.into_iter().filter(|(f, _)| *f >= floor * 0.8).map(|(_, it)| it).collect()
+    }
+
+    /// Rows of the calendar events that are in season: each event's pool is split into named sub groups, the page shows two of the first event and one of the second.
+    fn build_seasonal_sub_rows(&self, taken: &HashSet<u32>) -> Vec<Row> {
+        let mut events: Vec<(&str, f32)> = Vec::new();
+        for e in &self.taxonomy.entries {
+            let all_year = e.season.is_none_or(|s| s.start == (1, 1) && s.end == (12, 31));
+            if e.kind == "calendar" && !all_year && e.season.is_some_and(|s| s.active_on(self.today)) && self.vibe.seasons.contains_key(&e.event) && !events.iter().any(|(x, _)| *x == e.event.as_str()) {
+                events.push((e.event.as_str(), entry_noise(self.session, e.event.len() * 31 + e.event.bytes().map(|b| b as usize).sum::<usize>())));
+            }
+        }
+        events.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut rows: Vec<Row> = Vec::new(); let mut used: HashSet<u32> = taken.clone();
+        for (ei, (ev, _)) in events.into_iter().take(2).enumerate() {
+            let want = if ei == 0 { 2 } else { 1 };
+            let mut subs: Vec<&crate::vibe::SeasonSub> = self.vibe.seasons[ev].iter().collect();
+            subs.sort_by(|a, b| entry_noise(self.session, b.name.len() + b.items.len()).partial_cmp(&entry_noise(self.session, a.name.len() + a.items.len())).unwrap_or(std::cmp::Ordering::Equal));
+            let mut got = 0;
+            for sub in subs {
+                if got >= want { break; }
+                if sub.kw_share < SEASON_MIN_KW_SHARE { continue; }
+                let items = self.season_fit(ev, self.eligible(&sub.items, &used, true));
+                if items.len() < 8 { continue; }
+                let title = if self.vibe_name_ok(&sub.name, &items) { sub.name.clone() } else { continue };
+                if let Some(r) = self.row_of(&title, "calendar", &items) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); got += 1; }
+            }
+        }
+        rows
+    }
+
+    /// The page of a calendar event (Halloween, Pride): its sub groups as rows, in the order of their size.
+    fn build_event_page(&self, event: &str) -> Vec<Row> {
+        let Some(subs) = self.vibe.seasons.get(event) else { return Vec::new() };
+        let mut rows: Vec<Row> = Vec::new();
+        if let Some(r) = self.build_trending_row() { rows.push(r); }
+        let mut used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+        let mut titles: HashSet<String> = HashSet::new();
+        for sub in subs {
+            if rows.len() > self.target_rows { break; }
+            if sub.kw_share < SEASON_MIN_KW_SHARE { continue; }
+            let items = self.season_fit(event, self.eligible(&sub.items, &used, true));
+            if items.len() < 8 || !self.vibe_name_ok(&sub.name, &items) || !titles.insert(sub.name.to_lowercase()) { continue; }
+            if let Some(r) = self.row_of(&sub.name, "calendar", &items) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
+        }
+        rows
+    }
+
+    /// The Moods page: mood rows first (late night moods first at night), vibe rows after them.
+    fn build_moods_page(&self) -> Vec<Row> {
+        let mut rows: Vec<Row> = Vec::new();
+        if let Some(r) = self.build_trending_row() { rows.push(r); }
+        let mut used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+        let moods = self.build_mood_rows(&used, self.target_rows, false);
+        moods.iter().for_each(|r| r.items.iter().for_each(|i| { used.insert(i.id); }));
+        rows.extend(moods);
+        if rows.len() < self.target_rows { rows.extend(self.build_vibe_rows(&used, self.target_rows - rows.len())); }
+        rows
+    }
+
+    /// Inserts extra rows at positions 3, 6, 9 ... (or at the end when the page is shorter), keeping the first rows of the page.
+    fn interleave(&self, mut rows: Vec<Row>, extra: Vec<Row>, first: usize) -> Vec<Row> {
+        for (n, r) in extra.into_iter().enumerate() {
+            let at = (first + 3 * n).min(rows.len());
+            rows.insert(at, r);
+        }
+        rows
+    }
+
     /// A children's home: half the rows from live action titles, half from animated ones, alternating, so the page is not all cartoons. Each half is
     /// a page of its own (clustered from its own titles); the charts come from the live action half, which is built over the whole pool.
     fn build_kids_home(&self) -> Vec<Row> {
@@ -1030,7 +1268,43 @@ impl<'a> PageContext<'a> {
         out
     }
 
+    // ── Genre pages ───────────────────────────────────────────────────────────
+
+    /// Genre pages: the Moods page and the event pages (Halloween, Pride) are made of their own rows, topped up with the regular genre rows when the event has fewer sub groups than the page has rows.
     fn build_genre_page(&self) -> Vec<Row> {
+        if let Some(g) = self.genre {
+            let g = g.to_lowercase();
+            if g == "moods" && !self.vibe.moods.is_empty() && self.language.is_none() {
+                let r = self.build_moods_page();
+                if r.len() >= 4 { return r; }
+            }
+            let event = match g.as_str() { "halloween" => Some("halloween"), "pride" | "lgbtq" => Some("pride"), _ => None };
+            if let Some(ev) = event {
+                if self.language.is_none() && self.animation.is_none() {
+                    let mut rows = self.build_event_page(ev);
+                    if rows.len() >= 5 {
+                        if rows.len() <= self.target_rows {
+                            let mut used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+                            let mut titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+                            for r in self.build_genre_page_plain() {
+                                if rows.len() > self.target_rows { break; }
+                                if r.archetype == "trending" || !titles.insert(r.title.to_lowercase()) { continue; }
+                                let items: Vec<RowItem> = r.items.into_iter().filter(|i| !used.contains(&i.id)).collect();
+                                if items.len() >= 8 { items.iter().for_each(|i| { used.insert(i.id); }); rows.push(Row { items, ..r }); }
+                            }
+                        }
+                        return rows;
+                    }
+                }
+            }
+        }
+        self.build_genre_page_plain()
+    }
+
+    /// Rows for a genre filtered page. The global seeds hold too few titles of any
+    /// single genre, so cluster the genre's own best titles on the fly instead
+    /// (farthest first init, a few Lloyd rounds) to get sub-topics inside the genre.
+    fn build_genre_page_plain(&self) -> Vec<Row> {
         const POOL: usize = 3000;
         const MIN_CLUSTER: usize = 8;
 
@@ -1044,15 +1318,10 @@ impl<'a> PageContext<'a> {
         let mut pool: Vec<&CatalogItem> = self
             .catalog
             .values()
-            .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.map_or(true, |a| a == i.genres.iter().any(|g| g == "Animation")))
+            .filter(|i| passes_member_quality(i) && self.reliable(i) && self.matches_filters(i) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.is_none_or(|a| a == i.genres.iter().any(|g| g == "Animation")))
             .collect();
         // ties are broken by id so a page does not depend on the hash map order of the catalog (which changes at every reload)
-        pool.sort_unstable_by(|a, b| {
-            crate::quality::item_quality(b)
-                .partial_cmp(&crate::quality::item_quality(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        crate::quality::sort_by_quality(&mut pool);
         // Variety: on a page that is not about anime, Japanese language titles fill at most a third of the pool (they are many among the best
         // rated series and would otherwise fill most rows).
         if !matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime)) && self.language != Some("ja") {
@@ -1088,58 +1357,117 @@ impl<'a> PageContext<'a> {
             return rows;
         }
 
-        let k = self.target_rows.min(items.len() / MIN_CLUSTER).max(1);
-
-        // Farthest first initialisation
-        let mut centers: Vec<Vec<f32>> = vec![items[0].1.clone()];
-        let mut best_sim: Vec<f32> = items.iter().map(|(_, v)| cosine_sim(v, &centers[0])).collect();
-        while centers.len() < k {
-            let far = best_sim
-                .iter()
-                .enumerate()
-                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let c = items[far].1.clone();
-            for (i, (_, v)) in items.iter().enumerate() {
-                let s = cosine_sim(v, &c);
-                if s > best_sim[i] {
-                    best_sim[i] = s;
+        // Rows from the groups of the database. Every title of the page's pool belongs to a group at each level of the hierarchy (world level 2 down to level 1, themes in between);
+        // the finest level that gives enough groups of MIN_CLUSTER titles or more is used, each such group is a row. A pool too small for any level to give four rows is clustered by
+        // vectors instead, and its rows are then named after the group most of their titles share.
+        let items_all = items;
+        let want_rows = self.target_rows.min(items_all.len() / 20).max(6);
+        let mut group_mode: Option<GroupMode> = None; // (level, id) per cluster, and the item indices kept
+        if !self.groups.is_empty() {
+            let mut best: Option<(u8, Vec<GroupItems>)> = None;
+            for level in 0..crate::groups::N_LEVELS {
+                let mut by: HashMap<i32, Vec<usize>> = HashMap::new();
+                for (i, (it, _)) in items_all.iter().enumerate() {
+                    if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { by.entry(id).or_default().push(i); } }
+                }
+                let mut kept: Vec<(i32, Vec<usize>)> = by.into_iter().filter(|(_, ix)| ix.len() >= MIN_CLUSTER).collect();
+                kept.sort_by(|x, y| y.1.len().cmp(&x.1.len()).then(x.0.cmp(&y.0)));
+                let enough = kept.len() >= want_rows;
+                if best.as_ref().is_none_or(|(_, b)| kept.len() > b.len()) || enough { best = Some((level, kept)); }
+                if enough { break; }
+            }
+            if let Some((level, kept)) = best {
+                if kept.len() >= 4 {
+                    let ids: Vec<(u8, i32)> = kept.iter().map(|(g, _)| (level, *g)).collect();
+                    let idx: Vec<usize> = kept.into_iter().flat_map(|(_, ix)| ix).collect();
+                    group_mode = Some((ids, idx));
                 }
             }
-            centers.push(c);
         }
-
-        let assign_all = |centers: &[Vec<f32>]| -> Vec<(usize, f32)> {
-            items
-                .par_iter()
-                .map(|(_, v)| {
-                    centers
-                        .iter()
-                        .enumerate()
-                        .map(|(c, cv)| (c, cosine_sim(v, cv)))
-                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                        .unwrap_or((0, 0.0))
-                })
-                .collect()
-        };
-
-        let mut assign = assign_all(&centers);
-        for _ in 0..6 {
-            let mut sums = vec![vec![0.0f32; DIMS]; k];
-            for (i, &(c, _)) in assign.iter().enumerate() {
-                for (a, x) in sums[c].iter_mut().zip(items[i].1.iter()) {
-                    *a += x;
+        let cluster_group: Vec<(u8, i32)>;
+        let items: Vec<(&CatalogItem, Vec<f32>)>;
+        let centers: Vec<Vec<f32>>;
+        let assign: Vec<(usize, f32)>;
+        let k: usize;
+        if let Some((ids, idx)) = group_mode {
+            // items of the kept groups, in group order; a group's centre is the mean of its members
+            let mut sel: Vec<(&CatalogItem, Vec<f32>)> = Vec::with_capacity(idx.len());
+            let mut cid: Vec<usize> = Vec::with_capacity(idx.len());
+            let mut taken: HashMap<(u8, i32), usize> = HashMap::new();
+            for (c, key) in ids.iter().enumerate() { taken.insert(*key, c); }
+            for i in idx {
+                let it = items_all[i].0;
+                if let Some(g) = self.groups.get(&it.id) {
+                    if let Some(&c) = taken.get(&(ids[0].0, g.at(ids[0].0))) { sel.push((it, items_all[i].1.clone())); cid.push(c); }
                 }
             }
-            for (c, sum) in sums.into_iter().enumerate() {
-                let mut sum = sum;
-                if sum.iter().any(|x| x.abs() > 1e-9) {
-                    l2_normalize(&mut sum);
-                    centers[c] = sum;
+            let mut cs: Vec<Vec<f32>> = vec![vec![0.0f32; DIMS]; ids.len()];
+            for (n, (_, v)) in sel.iter().enumerate() { for (a, x) in cs[cid[n]].iter_mut().zip(v) { *a += x; } }
+            for c in cs.iter_mut() { l2_normalize(c); }
+            assign = sel.iter().enumerate().map(|(n, (_, v))| (cid[n], cosine_sim(v, &cs[cid[n]]))).collect();
+            k = ids.len(); centers = cs; cluster_group = ids; items = sel;
+        } else {
+            let items_k = items_all;
+            let k_means = self.target_rows.min(items_k.len() / MIN_CLUSTER).max(1);
+            let (c_, a_) = {
+                let items = &items_k;
+                let k = k_means;
+
+            // Farthest first initialisation
+            let mut centers: Vec<Vec<f32>> = vec![items[0].1.clone()];
+            let mut best_sim: Vec<f32> = items.iter().map(|(_, v)| cosine_sim(v, &centers[0])).collect();
+            while centers.len() < k {
+                let far = best_sim
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let c = items[far].1.clone();
+                for (i, (_, v)) in items.iter().enumerate() {
+                    let s = cosine_sim(v, &c);
+                    if s > best_sim[i] {
+                        best_sim[i] = s;
+                    }
                 }
+                centers.push(c);
             }
-            assign = assign_all(&centers);
+
+            let assign_all = |centers: &[Vec<f32>]| -> Vec<(usize, f32)> {
+                items
+                    .par_iter()
+                    .map(|(_, v)| {
+                        centers
+                            .iter()
+                            .enumerate()
+                            .map(|(c, cv)| (c, cosine_sim(v, cv)))
+                            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                            .unwrap_or((0, 0.0))
+                    })
+                    .collect()
+            };
+
+            let mut assign = assign_all(&centers);
+            for _ in 0..6 {
+                let mut sums = vec![vec![0.0f32; DIMS]; k];
+                for (i, &(c, _)) in assign.iter().enumerate() {
+                    for (a, x) in sums[c].iter_mut().zip(items[i].1.iter()) {
+                        *a += x;
+                    }
+                }
+                for (c, sum) in sums.into_iter().enumerate() {
+                    let mut sum = sum;
+                    if sum.iter().any(|x| x.abs() > 1e-9) {
+                        l2_normalize(&mut sum);
+                        centers[c] = sum;
+                    }
+                }
+                assign = assign_all(&centers);
+            }
+
+                (centers, assign)
+            };
+            k = k_means; centers = c_; assign = a_; cluster_group = Vec::new(); items = items_k;
         }
 
         // Order clusters: taste alignment when there is a taste vector, else size
@@ -1178,7 +1506,7 @@ impl<'a> PageContext<'a> {
                 size > 0 && anime_count[c].max(japanese_count[c]) * 10 > size * 4
             };
             let mut kept = 0;
-            let (mut early, mut late): (Vec<(usize, f32)>, Vec<(usize, f32)>) = (Vec::new(), Vec::new());
+            let (mut early, mut late): (Vec<ScoredIdx>, Vec<ScoredIdx>) = (Vec::new(), Vec::new());
             for entry in order.drain(..) {
                 if is_anime(entry.0) {
                     kept += 1;
@@ -1270,12 +1598,32 @@ impl<'a> PageContext<'a> {
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
                 None, self.mood_vault,
             ));
+            // the name of the group the row is built from, or of the group most of its titles belong to, comes first when it keeps its promise
+            let group_name = cluster_group.get(c).and_then(|key| self.group_names.get(key).cloned()).or_else(|| self.majority_group_name(&row_catalog));
+            if let Some(n) = group_name {
+                if crate::row_label::name_fits(&n, &row_catalog) && !entry_names_other_kind(&n, self.surface) { candidates.insert(0, n); }
+            }
             let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 6);
         }
 
         rows
+    }
+
+    /// The name of the group (finest level first) that at least half of the titles belong to, if it has one.
+    fn majority_group_name(&self, items: &[&CatalogItem]) -> Option<String> {
+        if items.is_empty() { return None; }
+        for level in 0..crate::groups::N_LEVELS {
+            let mut count: HashMap<i32, usize> = HashMap::new();
+            for it in items { if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { *count.entry(id).or_insert(0) += 1; } } }
+            if let Some((id, n)) = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))) {
+                if n * 2 >= items.len() {
+                    if let Some(name) = self.group_names.get(&(level, id)) { return Some(name.clone()); }
+                }
+            }
+        }
+        None
     }
 
     /// Build row items from ranked ids; no significant title word is shared by more than FRANCHISE_CAP titles.
@@ -1472,25 +1820,30 @@ impl<'a> PageContext<'a> {
 
     fn build_chart_row(&self, only: Option<&str>) -> Option<Row> {
         let nets = safety_nets();
-        let mut items: Vec<&CatalogItem> = self
-            .catalog
-            .values()
-            .filter(|item| self.matches_filters(item) && only.map_or(true, |t| item.media_type == t))
-            .filter(|item| !nets || chart_ok(item))
-            // a children's Top 10 holds titles made for children, as the rest of their home does
-            .filter(|item| !(self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles()) || kid_interest(self.profiles, item))
-            // a title that has not come out yet is not in a Top 10 of what people watch
-            .filter(|item| !self.fresh.is_upcoming(&item.media_type, item.tmdb_id, &self.today_ymd))
-            .collect();
         let size = if nets { TOP_N } else { ROW_SIZE };
-        // Only the top `size` are needed: select them in linear time instead of sorting the whole catalog
+        let kids_chart = self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles();
+        let keep = |item: &CatalogItem| {
+            only.is_none_or(|t| item.media_type == t)
+                && self.matches_filters(item)
+                // a children's Top 10 holds titles made for children, as the rest of their home does
+                && (!kids_chart || kid_interest(self.profiles, item))
+                // a title that has not come out yet is not in a Top 10 of what people watch
+                && !self.fresh.is_upcoming(&item.media_type, item.tmdb_id, &self.today_ymd)
+        };
         let by_pop_desc = |a: &&CatalogItem, b: &&CatalogItem| {
             b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id))
         };
-        if items.len() > size {
-            items.select_nth_unstable_by(size - 1, by_pop_desc);
-            items.truncate(size);
-        }
+        let mut items: Vec<&CatalogItem> = if nets {
+            // the catalog keeps the titles that can be on a chart, most popular first: the first `size` that pass the page's filters are the chart
+            self.catalog.chart_keys.iter().filter_map(|k| self.catalog.get(k)).filter(|i| keep(i)).take(size).collect()
+        } else {
+            let mut all: Vec<&CatalogItem> = self.catalog.values().filter(|i| keep(i)).collect();
+            if all.len() > size {
+                all.select_nth_unstable_by(size - 1, by_pop_desc);
+                all.truncate(size);
+            }
+            all
+        };
         items.sort_unstable_by(by_pop_desc);
         let row_items: Vec<RowItem> = items
             .into_iter()
@@ -1630,10 +1983,10 @@ fn entry_names_other_kind(title: &str, surface: &str) -> bool {
 
 /// A Top 10 needs real titles: art, a decent rating, scripted or documentary TV.
 pub fn chart_ok(item: &CatalogItem) -> bool {
-    item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
-        && item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty())
-        && item.vote_average >= 6.0
-        && item.overview_chars() >= 60
+    item.vote_average >= 6.0
+        && item.has_poster()
+        && item.has_backdrop()
+        && item.has_overview()
         && !matches!(item.tv_type.as_deref(), Some("Reality") | Some("Video") | Some("News") | Some("Talk Show") | Some("Soap"))
 }
 
@@ -1645,11 +1998,7 @@ pub fn meets_vote_floor(item: &CatalogItem, genre_page: bool) -> bool {
 pub fn passes_member_quality(item: &CatalogItem) -> bool {
     // The catalog has no vote_count, so popularity is the proxy for a reliable rating.
     // Measured pool: popularity >= 2 with rating >= 6.0 keeps about 38k titles of 700k.
-    item.vote_average >= 6.0
-        && item.popularity >= 2.0
-        && item.overview_chars() >= 60
-        && item.poster_path.as_deref().is_some_and(|p| !p.is_empty())
-        && (!safety_nets() || item.backdrop_path.as_deref().is_some_and(|b| !b.is_empty()))
+    item.vote_average >= 6.0 && item.popularity >= 2.0 && item.has_overview() && item.has_poster() && (!safety_nets() || item.has_backdrop())
 }
 
 /// Second most common genre, if any.
