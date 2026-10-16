@@ -210,7 +210,10 @@ impl<'a> PageContext<'a> {
         genres.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
         for (g, v) in genres.iter().take(6) {
             let fresh: Vec<&CatalogItem> = v.iter().copied().filter(|i| !used.contains(&i.id)).collect();
-            let name = format!("{} · {}", topic.name, crate::row_label::genre_noun(g).unwrap_or(g));
+            let noun = crate::row_label::genre_noun(g).unwrap_or(g);
+            // a genre the topic's own name already says (Political Dramas, Dramas) makes no row of its own
+            if topic.name.to_lowercase().contains(&noun.to_lowercase()) { continue; }
+            let name = format!("{} · {}", topic.name, noun);
             if let Some(r) = self.row_of(&name, "topic", &fresh) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
         }
         // by decade
