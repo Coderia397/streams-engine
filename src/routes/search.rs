@@ -17,6 +17,7 @@ use crate::people::{normalise, within_edits};
 /// a ranking of every full text match (which took seconds for words such as "love").
 struct TitleIndex {
     catalog_ptr: usize,
+    /// key, weight (see `search_weight`), normalised title
     rows: Vec<(u32, f32, String)>,
 }
 
@@ -28,10 +29,22 @@ fn title_index(catalog: &Arc<crate::catalog::CatalogMap>) -> Arc<TitleIndex> {
     if let Some(i) = slot.lock().unwrap().as_ref().filter(|i| i.catalog_ptr == ptr) {
         return i.clone();
     }
-    let rows = catalog.values().map(|i| (i.id, i.popularity, format!(" {} ", normalise(&i.title)))).collect();
+    let rows = catalog.values().map(|i| (i.id, search_weight(i), format!(" {} ", normalise(&i.title)))).collect();
     let built = Arc::new(TitleIndex { catalog_ptr: ptr, rows });
     *slot.lock().unwrap() = Some(built.clone());
     built
+}
+
+/// How much a title deserves to be shown among equal matches: how well known it is, plus a little for each sign that the entry is a real, complete title (a poster to show, a picture
+/// for the wide tile, a description, votes). One continuous score, so a new title with a poster and a description stands as well as an old one, and an entry with nothing to show sinks
+/// but is still found when it is the only match. TMDB popularity already follows what is current, so new titles need no exception.
+fn search_weight(i: &CatalogItem) -> f32 {
+    let has = |p: &Option<String>| p.as_deref().is_some_and(|s| !s.is_empty());
+    (1.0 + i.popularity.max(0.0)).ln()
+        + if has(&i.poster_path) { 0.8 } else { 0.0 }
+        + if has(&i.backdrop_path) { 0.3 } else { 0.0 }
+        + if i.overview.chars().count() >= 30 { 0.4 } else { 0.0 }
+        + 0.25 * (1.0 + i.vote_count as f32).ln().min(6.0)
 }
 
 /// Keys of titles whose words all match the query (the last word may be unfinished), exact title first, then titles starting with the query,
@@ -87,7 +100,7 @@ fn title_scored(index: &TitleIndex, qn: &str) -> Vec<(f32, u32)> {
         .filter(|(_, _, t)| t.contains(&last_pat) && head_pats.iter().all(|p| t.contains(p.as_str())))
         .map(|(k, pop, t)| {
             let tier = if *t == exact { 3.0 } else if t.starts_with(&starts) { 1.6 } else { 0.0 };
-            (tier + (1.0 + pop.max(0.0)).ln(), *k)
+            (tier + pop, *k)
         })
         .collect()
 }
