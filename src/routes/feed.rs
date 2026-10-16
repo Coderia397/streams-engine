@@ -48,7 +48,7 @@ pub struct FeedQuery {
 /// Initial rows cover about three desktop screens; the cap is Netflix's ~40 rows per
 /// page, reduced for genres whose quality pool cannot fill that many rows without
 /// repeating titles across two sessions (pool / (15 titles x 2)).
-const NETFLIX_ROWS_CAP: usize = 40;
+const NETFLIX_ROWS_CAP: usize = 60;
 const INITIAL_ROWS: usize = 12;
 const INITIAL_ROWS_GENRE: usize = 10;
 const MIN_ROWS_FLOOR: usize = 8; // two desktop screens
