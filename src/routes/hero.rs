@@ -30,6 +30,8 @@ pub struct HeroQuery {
     pub session_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Local hour of the client (0 to 23): the night hours favour the late night lines
+    pub hour: Option<u8>,
 }
 fn default_surface() -> String { "home".to_string() }
 fn default_limit() -> usize { 8 }
@@ -54,6 +56,11 @@ fn session_uniform(session: &str, id: u32) -> f64 {
     ((h.finish() >> 11) as f64 + 1.0) / ((1u64 << 53) as f64 + 1.0)
 }
 
+/// The six hour slot of the day the banner lines rotate with.
+fn hook_slot() -> usize {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize
+}
+
 fn hero_item_json(item: &CatalogItem) -> Value {
     json!({
         "id":            item.tmdb_id,
@@ -71,6 +78,45 @@ fn hero_item_json(item: &CatalogItem) -> Value {
         "rating_gb":     crate::catalog::gb_label(item.cert_gb),
         "rating_us":     crate::catalog::us_label(item.cert_us),
     })
+}
+
+/// Weighted draw (Efraimidis-Spirakis: key = u^(1/w), highest keys win) of `n` titles; without a session the order stays by quality.
+fn weighted_draw<'a>(pool: Vec<&'a CatalogItem>, n: usize, session: &str) -> Vec<&'a CatalogItem> {
+    if session.is_empty() {
+        return pool.into_iter().take(n).collect();
+    }
+    let mut keyed: Vec<(f64, &CatalogItem)> = pool
+        .into_iter()
+        .map(|i| {
+            let w = (quality_score(i) as f64).max(0.01);
+            (session_uniform(session, i.id).powf(1.0 / w), i)
+        })
+        .collect();
+    keyed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.into_iter().take(n).map(|(_, i)| i).collect()
+}
+
+/// The hero titles of a pool: mostly the cinematic best (the top `POOL_SIZE` by quality), with about a quarter discoveries (well rated titles that are less
+/// known, from the same pool so they still fit the page), the discoveries placed third and sixth in the carousel.
+fn draw_hero<'a>(mut pool: Vec<&'a CatalogItem>, limit: usize, session: &str) -> Vec<&'a CatalogItem> {
+    let by_score_desc = |a: &&CatalogItem, b: &&CatalogItem| quality_score(b).partial_cmp(&quality_score(a)).unwrap_or(std::cmp::Ordering::Equal);
+    let mut rest: Vec<&CatalogItem> = Vec::new();
+    if pool.len() > POOL_SIZE {
+        pool.select_nth_unstable_by(POOL_SIZE, by_score_desc);
+        rest = pool.split_off(POOL_SIZE);
+    }
+    pool.sort_by(by_score_desc);
+    // discoveries: the best rated of what is left, not the most popular
+    rest.retain(|i| i.vote_average >= 7.2 && i.vote_count >= 150);
+    rest.sort_by(|a, b| (b.vote_average * b.popularity.ln_1p().sqrt()).partial_cmp(&(a.vote_average * a.popularity.ln_1p().sqrt())).unwrap_or(std::cmp::Ordering::Equal));
+    rest.truncate(40);
+    let discoveries = if session.is_empty() { 0 } else { (limit / 4).min(rest.len()) };
+    let mut main = weighted_draw(pool, limit - discoveries, session);
+    let found = weighted_draw(rest, discoveries, &format!("{session}|discover"));
+    for (n, d) in found.into_iter().enumerate() {
+        main.insert((2 + 3 * n).min(main.len()), d);
+    }
+    main
 }
 
 /// GET /api/hero-feed?surface=&genre=&session_id=&limit=
@@ -95,7 +141,7 @@ pub async fn hero_feed(
 
     let session_state = if session.is_empty() { None } else { state.sessions.get(&session) };
     let version = session_state.as_ref().map_or(0, |s| s.lock().unwrap().version);
-    let cache_key = format!("hero:{surface}:{}:{session}:{limit}:v{version}:m{}", genre.as_deref().unwrap_or(""), maturity.map_or("-", |m| m.as_str()));
+    let cache_key = format!("hero:{surface}:{}:{session}:{limit}:v{version}:m{}:s{}:n{}", genre.as_deref().unwrap_or(""), maturity.map_or("-", |m| m.as_str()), hook_slot(), q.hour.is_some_and(|h| h >= 22 || h <= 4));
     if let Some(hit) = state.feed_cache.get(&cache_key).await {
         if let Ok(v) = serde_json::from_str::<Value>(&hit) {
             return Json(v);
@@ -107,7 +153,7 @@ pub async fn hero_feed(
 
     let seen = session_state.as_ref().map(|s| s.lock().unwrap().seen_ids().clone()).unwrap_or_default();
 
-    let mut pool: Vec<&CatalogItem> = catalog
+    let pool: Vec<&CatalogItem> = catalog
         .values()
         .filter(|i| {
             i.vote_average >= MIN_VOTE_AVERAGE
@@ -124,32 +170,49 @@ pub async fn hero_feed(
         })
         .collect();
 
-    let by_score_desc = |a: &&CatalogItem, b: &&CatalogItem| {
-        quality_score(b).partial_cmp(&quality_score(a)).unwrap_or(std::cmp::Ordering::Equal)
-    };
-    if pool.len() > POOL_SIZE {
-        pool.select_nth_unstable_by(POOL_SIZE, by_score_desc);
-        pool.truncate(POOL_SIZE);
-    }
-    pool.sort_by(by_score_desc);
-
-    // Efraimidis-Spirakis weighted draw: key = u^(1/w), highest keys win.
-    // Without a session the ranking stays purely by quality.
-    let chosen: Vec<&CatalogItem> = if session.is_empty() {
-        pool.into_iter().take(limit).collect()
+    // Films and series are drawn separately on the home page (series have larger popularity numbers, so one pool would fill with series) and
+    // alternate in the carousel; the home draw uses its own salt so it is not the Films or Series carousel again.
+    // the draw rotates every six hours for the same session
+    let drawn_session = if session.is_empty() { String::new() } else { format!("{session}|{}", hook_slot()) };
+    let chosen: Vec<&CatalogItem> = if media_type.is_none() {
+        let salt = format!("{drawn_session}|home");
+        let (movies, series): (Vec<&CatalogItem>, Vec<&CatalogItem>) = pool.into_iter().partition(|i| i.media_type == "movie");
+        let (m, t) = (draw_hero(movies, limit, &salt), draw_hero(series, limit, &salt));
+        let series_first = !session.is_empty() && session_uniform(&drawn_session, 7) < 0.5;
+        let (mut first, mut second) = if series_first { (t.into_iter(), m.into_iter()) } else { (m.into_iter(), t.into_iter()) };
+        let mut out: Vec<&CatalogItem> = Vec::with_capacity(limit);
+        while out.len() < limit {
+            let (a, b) = (first.next(), second.next());
+            if a.is_none() && b.is_none() { break; }
+            out.extend(a);
+            if out.len() < limit { out.extend(b); }
+        }
+        out
     } else {
-        let mut keyed: Vec<(f64, &CatalogItem)> = pool
-            .into_iter()
-            .map(|i| {
-                let w = (quality_score(i) as f64).max(0.01);
-                (session_uniform(&session, i.id).powf(1.0 / w), i)
-            })
-            .collect();
-        keyed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        keyed.into_iter().take(limit).map(|(_, i)| i).collect()
+        draw_hero(pool, limit, &drawn_session)
     };
 
-    let items: Vec<Value> = chosen.iter().map(|i| hero_item_json(i)).collect();
+    let fresh = state.fresh.load();
+    let env = crate::hooks::HookEnv {
+        catalog: &catalog,
+        vibe: &state.vibe,
+        taxonomy: &state.taxonomy,
+        profiles: &state.profiles,
+        fresh: &fresh,
+        today_md: crate::taxonomy::today_md(),
+        today_days: crate::fresh::today_days(),
+        late_night: q.hour.is_some_and(|h| h >= 22 || h <= 4),
+        session: &session,
+        slot: hook_slot(),
+    };
+    let items: Vec<Value> = chosen
+        .iter()
+        .map(|i| {
+            let mut v = hero_item_json(i);
+            v["hooks"] = Value::Array(crate::hooks::hero_hooks(i, &env));
+            v
+        })
+        .collect();
     let body = json!({
         "surface": surface,
         "genre":   genre,

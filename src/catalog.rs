@@ -405,9 +405,64 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
     }
 
     apply_popularity_overlay(&mut map, db_path);
+    apply_awards(&mut map, db_path);
+    apply_categories(&mut map, db_path);
     let catalog = Catalog::new(map);
     info!("Catalog loaded: {} items, {} on the chart list", catalog.len(), catalog.chart_keys.len());
     Ok(catalog)
+}
+
+/// Adds the awards of `awards_v1.json` (next to the database) to the keywords of the titles as `award:<family>:won` or `award:<family>:nominated`, so any
+/// page rule or banner line can ask for them. The file is `{ "emmy": { "<tmdb id>": { "won": n, "nominated": n } }, "oscar": ..., "bafta": ..., "globe": ... }`
+/// with `_tv` after the family name for series ids (`emmy` is series only). A missing file adds nothing.
+fn apply_awards(map: &mut HashMap<u32, CatalogItem>, db_path: &str) {
+    let Some(path) = std::path::Path::new(db_path).parent().map(|d| d.join("awards_v1.json")) else { return };
+    let Some(raw) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return };
+    let Some(obj) = raw.as_object() else { return };
+    let mut added = 0usize;
+    for (fam, titles) in obj {
+        let (base, media) = match fam.strip_suffix("_tv") { Some(b) => (b, "tv"), None if fam == "emmy" => ("emmy", "tv"), None => (fam.as_str(), "movie") };
+        let Some(titles) = titles.as_object() else { continue };
+        for (id, e) in titles {
+            let Ok(id) = id.parse::<u32>() else { continue };
+            let Some(item) = map.get_mut(&item_key(media, id)) else { continue };
+            let kind = if e.get("won").and_then(|w| w.as_u64()).unwrap_or(0) > 0 { "won" } else { "nominated" };
+            let tag = format!("award:{base}:{kind}");
+            if !item.keywords.contains(&tag) {
+                item.keywords.push(tag);
+                added += 1;
+            }
+        }
+    }
+    info!("Awards: {added} titles marked from {}", path.display());
+}
+
+/// True once `categories_v1.json` was applied: the pages it covers then use the judged membership alone (the old keyword rules only propose candidates).
+pub static CATEGORIES_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Adds the judged memberships of `categories_v1.json` (page categories) and `topics_v1.json` (topic rows) next to the database to the keywords of the titles as
+/// `cat:<slug>` and `topic:<slug>`. Both files are `{ "<slug>": { "<movie|tv>:<tmdb id>": probability } }`, only titles the judge accepted. A missing file adds nothing.
+fn apply_categories(map: &mut HashMap<u32, CatalogItem>, db_path: &str) {
+    let Some(dir) = std::path::Path::new(db_path).parent() else { return };
+    for (file, prefix) in [("categories_v1.json", "cat"), ("topics_v1.json", "topic")] {
+        let Some(raw) = std::fs::read_to_string(dir.join(file)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { continue };
+        let Some(obj) = raw.as_object() else { continue };
+        let mut added = 0usize;
+        for (slug, members) in obj {
+            let Some(members) = members.as_object() else { continue };
+            let tag = format!("{prefix}:{slug}");
+            for key in members.keys() {
+                let Some((media, id)) = key.split_once(':') else { continue };
+                let Ok(id) = id.parse::<u32>() else { continue };
+                if let Some(item) = map.get_mut(&item_key(media, id)) {
+                    item.keywords.push(tag.clone());
+                    added += 1;
+                }
+            }
+        }
+        if prefix == "cat" && added > 0 { CATEGORIES_LOADED.store(true, std::sync::atomic::Ordering::Relaxed); }
+        info!("{file}: {added} memberships added");
+    }
 }
 
 /// Create a shared, atomically-swappable catalog pointer.

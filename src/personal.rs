@@ -30,6 +30,7 @@ impl<'a> PageContext<'a> {
     fn personal_ok(&self, item: &CatalogItem) -> bool {
         !item.adult
             && (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
+            && self.genre_spec.is_none_or(|g| g.matches(item))
             && self.maturity.is_none_or(|m| self.maturity_allows(m, item))
             && (!crate::page::safety_nets() || self.allowed_by_nets(item))
     }
@@ -88,7 +89,13 @@ impl<'a> PageContext<'a> {
             .eligible(keys, taken, false)
             .into_iter()
             .filter(|i| !gems_only || is_gem(i))
-            .take(300)
+            // up to 150 films and 150 series (series have larger popularity numbers and would fill the first 300 alone)
+            .scan((0usize, 0usize), |n, i| {
+                let slot = if i.media_type == "tv" { &mut n.1 } else { &mut n.0 };
+                *slot += 1;
+                Some((*slot <= 150).then_some(i))
+            })
+            .flatten()
             .enumerate()
             .map(|(rank, i)| (40.0 * entry_noise(self.session, salt + i.id as usize) - rank as f32, i))
             .collect();
@@ -166,7 +173,7 @@ impl<'a> PageContext<'a> {
                 let keys = self.neighbour_keys(t, 800).await;
                 self.rank_by_taste(&keys, &used, t, false)
             }
-            None => self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(1500)], &used, false, 100_003),
+            None => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(1500)], &used, false, 100_003)),
         };
         if let Some(mut r) = self.row_of("Today's Top Picks for You", "personal", &top) {
             r.archetype = "top_picks".to_string();
@@ -206,7 +213,7 @@ impl<'a> PageContext<'a> {
                 let keys = self.neighbour_keys(t, 2500).await;
                 self.rank_by_taste(&keys, &used, t, true)
             }
-            None => self.rank_by_session(self.catalog.gem_keys.as_slice(), &used, true, 200_017),
+            None => blend_types(self.rank_by_session(self.catalog.gem_keys.as_slice(), &used, true, 200_017)),
         };
         if let Some(mut r) = self.row_of("Gems for You", "personal", &gems) {
             r.archetype = "gems".to_string();
@@ -236,14 +243,7 @@ impl<'a> PageContext<'a> {
 
     /// The events whose calendar window is open today and that have title groups to show (Halloween in October, Pride in June).
     pub(crate) fn active_events(&self) -> Vec<&str> {
-        let mut events: Vec<&str> = Vec::new();
-        for e in &self.taxonomy.entries {
-            let all_year = e.season.is_none_or(|s| s.start == (1, 1) && s.end == (12, 31));
-            if e.kind == "calendar" && !all_year && e.season.is_some_and(|s| s.active_on(self.today)) && self.vibe.seasons.contains_key(&e.event) && !events.contains(&e.event.as_str()) {
-                events.push(e.event.as_str());
-            }
-        }
-        events
+        events_in_season(self.taxonomy, self.vibe, self.today)
     }
 
     /// Chips for the top of a page: one for each event in season, with the page it opens (the Halloween chip of the Netflix app).
@@ -251,52 +251,84 @@ impl<'a> PageContext<'a> {
         self.active_events().into_iter().map(|ev| json!({ "id": ev, "label_key": format!("event.{ev}"), "label": prettify(ev), "target": event_target(ev) })).collect()
     }
 
-    /// Up to `want` collection rows: an event that is in season (its sub groups of titles) and a mood ("For Every Feeling"). Each carries what a banner needs: label, description,
-    /// target page and the lead titles' pictures, so the client draws the banner without art of its own.
+    /// The collection rows of the page: the themes the engine picked for this profile in this part of the day. A theme is an event in season (its sub groups of
+    /// titles) or a mood ("For Every Feeling"); the pick rotates every six hours and differs between profiles, events in season are favoured, and a page shows one
+    /// or two of them. Each row carries what a banner needs: label, description, accent hue, target page and the lead titles' pictures.
     pub(crate) fn build_collection_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
+        let slot = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize;
+        let seed = format!("{}|{}", self.session, slot);
+        let count = (1 + (entry_noise(&seed, 99_991) > 0.45) as usize).min(want);
+        enum Theme<'a> { Event(&'a str), Mood(&'a crate::vibe::Mood) }
+        let mut themes: Vec<(f32, Theme)> = Vec::new();
+        for ev in self.active_events() { themes.push((0.35 + entry_noise(&seed, ev.len() * 31 + ev.bytes().map(|b| b as usize).sum::<usize>()), Theme::Event(ev))); }
+        for m in &self.vibe.moods { themes.push((entry_noise(&seed, 7_000 + m.id.len() * 13 + m.id.bytes().map(|b| b as usize).sum::<usize>()) + if self.late_night && m.late { 0.4 } else { 0.0 }, Theme::Mood(m))); }
+        themes.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let mut rows: Vec<Row> = Vec::new();
         let mut used = taken.clone();
-        // an event whose window is open today
-        let mut events = self.active_events();
-        events.sort_by(|a, b| entry_noise(self.session, b.len() * 17 + b.bytes().map(|x| x as usize).sum::<usize>()).partial_cmp(&entry_noise(self.session, a.len() * 17 + a.bytes().map(|x| x as usize).sum::<usize>())).unwrap_or(std::cmp::Ordering::Equal));
-        for ev in events {
-            if !rows.is_empty() { break; }
-            let mut lead: Vec<&CatalogItem> = Vec::new();
-            let mut names: Vec<&str> = Vec::new();
-            for sub in &self.vibe.seasons[ev] {
-                if sub.kw_share < 0.4 || names.len() >= 4 { continue; }
-                let got = self.season_fit(ev, self.eligible(&sub.items, &used, true));
-                if got.len() < 8 { continue; }
-                names.push(sub.name.as_str());
-                lead.extend(got.into_iter().take(5));
-            }
-            let label = prettify(ev);
-            if lead.len() >= 8 {
-                if let Some(mut r) = self.row_of_any(&format!("{label} Collection"), "collection", &lead) {
-                    r.archetype = "collection".to_string();
-                    r.meta = Some(collection_meta(ev, &format!("event.{ev}"), &label, &names.join(", "), event_target(ev), &r));
-                    r.items.iter().for_each(|i| { used.insert(i.id); });
-                    rows.push(r);
+        for (_, theme) in themes {
+            if rows.len() >= count { break; }
+            match theme {
+                Theme::Event(ev) => {
+                    let mut lead: Vec<&CatalogItem> = Vec::new();
+                    let mut names: Vec<&str> = Vec::new();
+                    for sub in &self.vibe.seasons[ev] {
+                        if sub.kw_share < 0.4 || names.len() >= 4 { continue; }
+                        let got = self.season_fit(ev, self.eligible(&sub.items, &used, true));
+                        if got.len() < 8 { continue; }
+                        names.push(sub.name.as_str());
+                        lead.extend(got.into_iter().take(5));
+                    }
+                    let label = prettify(ev);
+                    if lead.len() < 8 { continue; }
+                    if let Some(mut r) = self.row_of_any(&format!("{label} Collection"), "collection", &lead) {
+                        r.archetype = "collection".to_string();
+                        r.meta = Some(collection_meta(ev, &format!("event.{ev}"), &label, &names.join(", "), event_target(ev), &r));
+                        r.items.iter().for_each(|i| { used.insert(i.id); });
+                        rows.push(r);
+                    }
+                }
+                Theme::Mood(m) => {
+                    if let Some(mut r) = self.mood_row(m, &used) {
+                        let names: Vec<&str> = m.groups.iter().take(3).filter_map(|(g, _)| self.group_names.get(&(5, *g)).map(|s| s.as_str())).collect();
+                        r.archetype = "collection".to_string();
+                        r.kind = "collection".to_string();
+                        r.meta = Some(collection_meta(&m.id, "collection.for_every_feeling", "For Every Feeling", &names.join(", "), json!({ "genre": "Moods" }), &r));
+                        r.items.iter().for_each(|i| { used.insert(i.id); });
+                        rows.push(r);
+                    }
                 }
             }
         }
-        if rows.len() < want {
-            let mood_rows = self.build_mood_rows(&used, 1, self.late_night);
-            if let Some(mut r) = mood_rows.into_iter().next() {
-                let names: Vec<&str> = self.vibe.moods.iter().find(|m| m.title == r.title).map(|m| m.groups.iter().take(3).filter_map(|(g, _)| self.group_names.get(&(5, *g)).map(|s| s.as_str())).collect()).unwrap_or_default();
-                let id = self.vibe.moods.iter().find(|m| m.title == r.title).map(|m| m.id.clone()).unwrap_or_default();
-                r.archetype = "collection".to_string();
-                r.kind = "collection".to_string();
-                r.meta = Some(collection_meta(&id, "collection.for_every_feeling", "For Every Feeling", &names.join(", "), json!({ "genre": "Moods" }), &r));
-                rows.push(r);
-            }
-        }
-        rows.truncate(want);
         rows
     }
 }
 
-fn prettify(id: &str) -> String {
+/// Films and series alternate in a list that comes from popularity (series have larger popularity numbers and would fill a row), each kept in its own order.
+fn blend_types(items: Vec<&CatalogItem>) -> Vec<&CatalogItem> {
+    let (movies, series): (Vec<&CatalogItem>, Vec<&CatalogItem>) = items.into_iter().partition(|i| i.media_type == "movie");
+    let (mut m, mut t) = (movies.into_iter(), series.into_iter());
+    let mut out = Vec::new();
+    loop {
+        let (a, b) = (m.next(), t.next());
+        if a.is_none() && b.is_none() { break; }
+        out.extend(a);
+        out.extend(b);
+    }
+    out
+}
+
+pub fn events_in_season<'a>(taxonomy: &'a crate::taxonomy::TaxonomyStore, vibe: &crate::vibe::VibeIndex, today: (u8, u8)) -> Vec<&'a str> {
+    let mut events: Vec<&str> = Vec::new();
+    for e in &taxonomy.entries {
+        let all_year = e.season.is_none_or(|s| s.start == (1, 1) && s.end == (12, 31));
+        if e.kind == "calendar" && !all_year && e.season.is_some_and(|s| s.active_on(today)) && vibe.seasons.contains_key(&e.event) && !events.contains(&e.event.as_str()) {
+            events.push(e.event.as_str());
+        }
+    }
+    events
+}
+
+pub fn prettify(id: &str) -> String {
     id.split('_').map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join(" ")
 }
 
@@ -310,11 +342,13 @@ fn event_target(ev: &str) -> serde_json::Value {
 }
 
 fn collection_meta(id: &str, label_key: &str, label: &str, description: &str, target: serde_json::Value, row: &Row) -> serde_json::Value {
-    let images: Vec<&str> = row.items.iter().filter_map(|i| i.backdrop_path.as_deref().or(i.poster_path.as_deref())).take(5).collect();
+    let images: Vec<&str> = row.items.iter().filter_map(|i| i.backdrop_path.as_deref().or(i.poster_path.as_deref())).take(8).collect();
+    // a colour of its own for each collection, the same on every visit
+    let hue = id.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
     json!({
         "title_key": "collection.title",
         "title_args": { "label": label },
-        "collection": { "id": id, "label_key": label_key, "label": label, "description": description, "target": target, "images": images },
+        "collection": { "id": id, "label_key": label_key, "label": label, "description": description, "target": target, "images": images, "hue": hue },
     })
 }
 
@@ -329,6 +363,14 @@ mod tests {
             vote_average: rating, popularity, is_anime: false, vote_count: votes, adult: false,
             original_language: "en".into(), tv_type: None, countries: vec![], keywords: vec![], runtime: 0, flags: 0, cert: 0, cert_gb: 0, cert_us: 0,
         }
+    }
+
+    #[test]
+    fn blend_alternates_films_and_series() {
+        let (mut a, mut b, mut c) = (item(8.0, 5.0, 400), item(8.0, 5.0, 400), item(8.0, 5.0, 400));
+        a.id = 1; b.id = 2; c.id = 3; b.media_type = "tv".into(); c.media_type = "tv".into();
+        let out = blend_types(vec![&b, &c, &a]);
+        assert_eq!(out.iter().map(|i| i.id).collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]

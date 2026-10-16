@@ -14,8 +14,10 @@ use crate::catalog::CatalogItem;
 pub enum GenreSpec {
     /// Matches everything (a picker that is not a filter, for example Moods)
     Any,
-    /// A collection the data cannot express (no award data for Emmys, about 30 titles for Astrology)
+    /// A collection the data cannot express (about 30 titles for Astrology)
     Unsupported,
+    /// Titles that won or were nominated for an award family (`emmy`, `oscar`, `bafta`, `globe`), from the awards file
+    Awards(&'static str),
     /// Any of these TMDB genre names, movie and TV naming
     Tmdb(&'static [&'static str]),
     Thriller,
@@ -57,6 +59,10 @@ fn has_genre(it: &CatalogItem, names: &[&str]) -> bool {
 fn kw_is(it: &CatalogItem, words: &[&str]) -> bool {
     it.keywords.iter().any(|k| words.iter().any(|w| k == w))
 }
+/// Membership judged for this page category (`cat:<slug>`); None when the judged file was not loaded, so the page falls back to its keyword rule.
+fn judged(it: &CatalogItem, slug: &str) -> Option<bool> {
+    crate::catalog::CATEGORIES_LOADED.load(std::sync::atomic::Ordering::Relaxed).then(|| it.keywords.iter().any(|k| k.strip_prefix("cat:") == Some(slug)))
+}
 fn kw_has(it: &CatalogItem, parts: &[&str]) -> bool {
     it.keywords.iter().any(|k| parts.iter().any(|p| k.contains(p)))
 }
@@ -78,9 +84,20 @@ impl GenreSpec {
 
     pub fn matches(&self, it: &CatalogItem) -> bool {
         use GenreSpec::*;
+        // the pages whose membership was judged on Colab use the judged list alone; the keyword rules below only propose candidates
+        let slug = match self {
+            BlackStories => Some("black_stories"), Cult => Some("cult"), Halloween => Some("halloween"), Independent => Some("independent"), Lgbtq => Some("lgbtq"),
+            ScienceNature => Some("science_nature"), Sports => Some("sport"), StandUp => Some("stand_up"), ChatShows => Some("chat_shows"), _ => None,
+        };
+        if let Some(slug) = slug {
+            if let Some(j) = judged(it, slug) {
+                return j || (matches!(self, ChatShows) && judged(it, "stand_up") == Some(true));
+            }
+        }
         match self {
             Any => true,
             Unsupported => false,
+            Awards(family) => it.keywords.iter().any(|k| k.strip_prefix("award:").is_some_and(|r| r.split(':').next() == Some(*family))),
             Tmdb(names) => has_genre(it, names),
             Thriller => has_genre(it, &["Thriller"]) || (it.media_type == "tv" && has_genre(it, &["Mystery"])),
             Anime => it.is_anime,
@@ -158,7 +175,8 @@ fn by_name(key: &str) -> Option<GenreSpec> {
         "adventure" => Tmdb(&["Adventure", "Action & Adventure"]),
         "animation" => Tmdb(&["Animation"]),
         "anime" => Anime,
-        "astrology" | "emmys" => Unsupported,
+        "astrology" => Unsupported,
+        "emmys" => Awards("emmy"),
         "black stories" => BlackStories,
         "book adaptations" => BookAdaptations,
         "british" => British,
@@ -285,7 +303,11 @@ mod tests {
         assert_eq!(resolve("Stand-up and Chat Shows", "tv"), GenreSpec::ChatShows);
         assert_eq!(resolve("10008", "tv"), GenreSpec::Us);
         assert_eq!(resolve("10008", "movie"), GenreSpec::Us);
-        assert_eq!(resolve("Emmys", "tv"), GenreSpec::Unsupported);
+        assert_eq!(resolve("Emmys", "tv"), GenreSpec::Awards("emmy"));
+        let mut c = item("tv");
+        assert!(!resolve("Emmys", "tv").matches(&c));
+        c.keywords = vec!["award:emmy:nominated".into()];
+        assert!(resolve("Emmys", "tv").matches(&c));
         assert_eq!(resolve("Noir", "movie"), GenreSpec::Name("Noir".into()));
     }
 

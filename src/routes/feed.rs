@@ -223,7 +223,10 @@ pub async fn feed(
 
     let mut key = cache_key(surface, &genre.unwrap_or("").to_lowercase(), offset + per_page, taste_str);
     // Entry driven pages explore per session, so the session is part of the key
-    key = format!("{key}|s:{}", session_id.as_deref().unwrap_or(""));
+    // the choice of rows rotates every six hours for the same session, so a returning visitor does not meet the same page all week
+    let slot = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600));
+    let noise_session = format!("{}|{slot}", session_id.as_deref().unwrap_or(""));
+    key = format!("{key}|t:{slot}|s:{}", session_id.as_deref().unwrap_or(""));
     if session_version > 0 {
         key = format!("{key}|{}|v{session_version}", session_id.as_deref().unwrap_or(""));
     }
@@ -244,8 +247,13 @@ pub async fn feed(
     let catalog = state.catalog.load();
     let fresh = state.fresh.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
+    // the rows the page's own titles can fill; the page is topped up with neighbouring rows to the floor, but the page is only offered when its own cap is enough
+    let own_cap = match (&genre_spec, language.as_deref()) {
+        (Some(spec), None) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
+        _ => usize::MAX,
+    };
     let cap = match (&genre_spec, language.as_deref()) {
-        (Some(spec), None) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity).max(crate::page::THIN_PAGE_FLOOR),
+        (Some(_), None) => own_cap.max(crate::page::THIN_PAGE_FLOOR),
         (_, Some(lang)) => language_row_cap_cached(&catalog, &state.profiles, surface, lang, maturity),
         (None, None) => NETFLIX_ROWS_CAP,
     };
@@ -287,7 +295,7 @@ pub async fn feed(
         target_rows,
         mean:       &state.mean,
         today:      crate::taxonomy::today_md(),
-        session:    session_id.as_deref().unwrap_or(""),
+        session:    if session_id.is_some() { noise_session.as_str() } else { "" },
         maturity,
         fill_pool:  None,
         skip:       None,
@@ -301,7 +309,7 @@ pub async fn feed(
         "surface":     surface,
         "genre":       genre,
         "row_cap":     cap,
-        "genre_page_supported": (genre.is_none() && language.is_none()) || cap >= MIN_GENRE_PAGE_ROWS,
+        "genre_page_supported": (genre.is_none() && language.is_none()) || (if genre_spec.is_some() && language.is_none() { own_cap } else { cap }) >= MIN_GENRE_PAGE_ROWS,
         "language":    language,
         "total_rows":  rows.len(),
         "offset":      offset,
