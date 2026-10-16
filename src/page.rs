@@ -195,6 +195,8 @@ pub struct RowItem {
     pub cert:         u8,
     pub cert_gb:      u8,
     pub cert_us:      u8,
+    /// Minutes: movie runtime or median episode runtime, 0 when unknown
+    pub runtime:      u32,
 }
 
 impl RowItem {
@@ -216,6 +218,7 @@ impl RowItem {
             cert:          item.cert,
             cert_gb:       item.cert_gb,
             cert_us:       item.cert_us,
+            runtime:       item.runtime,
         }
     }
 }

@@ -285,7 +285,7 @@ pub async fn feed(
         skip:       None,
     };
 
-    let all_rows = to_client_rows(ctx.build_page().await, &session_seen);
+    let all_rows = to_client_rows(ctx.build_page().await, &session_seen, &state.profiles, &fresh);
     let has_more = all_rows.len() > offset + per_page && offset + per_page < cap;
     let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(offset).take(per_page).collect();
     let response = json!({
@@ -310,17 +310,21 @@ pub async fn feed(
 
 /// Convert engine rows to the client FeedRow shape. Titles are deduplicated
 /// across rows (earlier rows win) and rows left with too few items are dropped.
-fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>) -> Vec<serde_json::Value> {
+fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &crate::profiles::ProfileStore, fresh: &crate::fresh::FreshStore) -> Vec<serde_json::Value> {
     const MIN_ROW_ITEMS: usize = 4;
     let mut seen: HashSet<u32> = HashSet::new();
     let mut out = Vec::new();
+    let today = crate::fresh::today_days();
 
     for (i, row) in rows.into_iter().enumerate() {
+        let chart = row.archetype == "trending";
         let items: Vec<serde_json::Value> = row
             .items
             .iter()
             .filter(|it| !already_seen.contains(&it.id) && seen.insert(it.id))
-            .map(|it| {
+            .enumerate()
+            .map(|(n, it)| {
+                let release = fresh.get(&it.media_type, it.tmdb_id).map(|f| f.release_date.as_str());
                 json!({
                     "id":            it.tmdb_id,
                     "media_type":    it.media_type,
@@ -336,6 +340,9 @@ fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>) -> Vec<serde_json
                     "rating":        crate::catalog::cert_label(it.cert),
                     "rating_gb":     crate::catalog::gb_label(it.cert_gb),
                     "rating_us":     crate::catalog::us_label(it.cert_us),
+                    "runtime":       it.runtime,
+                    "tags":          crate::contract::item_tags(profiles.get(it.id), &it.genres, 3),
+                    "badges":        crate::contract::item_badges(chart.then_some(n + 1), release, today),
                 })
             })
             .collect();

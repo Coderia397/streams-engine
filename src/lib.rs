@@ -1,5 +1,6 @@
 pub mod attributes;
 pub mod catalog;
+pub mod contract;
 pub mod fresh;
 pub mod genre_spec;
 pub mod groups;

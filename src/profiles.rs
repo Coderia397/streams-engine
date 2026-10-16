@@ -120,6 +120,11 @@ const TONE_NAMES: &[(&str, &str)] = &[
     ("action-packed", "Action-Packed"), ("suspenseful", "Suspenseful"), ("tense", "Suspenseful"), ("sarcastic", "Sarcastic"),
 ];
 
+/// The display name of a tone word of a profile ("gritty" to "Gritty"), None for words that are not used in names and tags.
+pub fn tone_label(word: &str) -> Option<&'static str> {
+    tone_display(word)
+}
+
 fn tone_display(word: &str) -> Option<&'static str> {
     TONE_NAMES.iter().find(|(w, _)| *w == word).map(|(_, d)| *d)
 }
