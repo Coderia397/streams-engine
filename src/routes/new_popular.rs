@@ -179,9 +179,14 @@ fn item_json(c: &Cand, rank: Option<usize>, today: i64) -> Value {
 
 /// The Top 10: the most popular released titles of one type, by popularity refreshed daily.
 fn chart(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, media_type: &str, today: &str, year: i32) -> Vec<Cand> {
+    chart_where(catalog, fresh, maturity, profiles, today, year, |i| i.media_type == media_type)
+}
+
+/// The Top 10 of the titles that pass `keep`: a language, a genre, a type.
+fn chart_where(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, today: &str, year: i32, keep: impl Fn(&CatalogItem) -> bool) -> Vec<Cand> {
     let mut items: Vec<&CatalogItem> = catalog
         .values()
-        .filter(|i| i.media_type == media_type && crate::page::chart_ok(i) && catalog_allowed(i, maturity, profiles))
+        .filter(|i| keep(i) && crate::page::chart_ok(i) && catalog_allowed(i, maturity, profiles))
         .filter(|i| i.release_year.is_none_or(|y| y <= year) && !fresh.is_upcoming(&i.media_type, i.tmdb_id, today))
         .collect();
     items.sort_unstable_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
@@ -305,8 +310,11 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     let wide = limit * 4;
     let recent = |c: &&Cand, days: i64| c.released(today) && c.days_since(today_n).is_some_and(|d| d <= days);
 
-    rows.push(RowOut { title: "Top 10 Movies Today".into(), key: "row.np_top10_movies", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "movie", today, year) });
-    rows.push(RowOut { title: "Top 10 Series Today".into(), key: "row.np_top10_series", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "tv", today, year) });
+    // the charts are built here and placed among the other rows at the end: how many there are, which, and where changes with the session and the slot
+    let mut charts: Vec<RowOut> = vec![
+        RowOut { title: "Top 10 Movies Today".into(), key: "row.np_top10_movies", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "movie", today, year) },
+        RowOut { title: "Top 10 Series Today".into(), key: "row.np_top10_series", args: Value::Null, row_type: "top_ten", kind: "chart", items: chart(catalog, fresh, maturity, profiles, "tv", today, year) },
+    ];
 
     // what is being watched today, in TMDB's own order
     let mut trending: Vec<&Cand> = pool.iter().copied().filter(|c| c.released(today) && c.in_list("trending_day")).collect();
@@ -343,6 +351,11 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     }
     let mut langs: Vec<(&str, usize)> = by_lang.into_iter().filter(|(_, n)| *n >= MIN_ROW_ITEMS).collect();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    // the biggest language also gets a Top 10 of its own among the charts
+    if let Some((code, _)) = langs.first() {
+        let (code, label) = (*code, crate::row_label::language_label(code).unwrap_or(code));
+        charts.push(RowOut { title: format!("Top 10 {label} Titles Today"), key: "row.np_top10_language", args: json!({ "language": label }), row_type: "top_ten", kind: "chart", items: chart_where(catalog, fresh, maturity, profiles, today, year, |i| i.original_language == code) });
+    }
     // the four biggest languages compete, two get a row: which two changes with the session and the slot
     for (code, _) in pick_by_noise(langs, 4, 2, session, slot) {
         let v: Vec<&Cand> = fresh_released.iter().copied().filter(|c| c.language == code).collect();
@@ -360,6 +373,10 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     }
     let mut genres: Vec<(&str, usize)> = by_genre.into_iter().filter(|(_, n)| *n >= MIN_ROW_ITEMS + 4).collect();
     genres.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    if let Some((g, _)) = genres.first() {
+        let (g, noun) = (*g, crate::row_label::genre_noun(g).unwrap_or(g));
+        charts.push(RowOut { title: format!("Top 10 {noun} Today"), key: "row.np_top10_genre", args: json!({ "genre": noun }), row_type: "top_ten", kind: "chart", items: chart_where(catalog, fresh, maturity, profiles, today, year, |i| i.genres.iter().any(|x| x == g)) });
+    }
     for (g, _) in pick_by_noise(genres, 5, 3, session, slot) {
         let v: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 90) && c.genres.iter().any(|x| x == g)).collect();
         let noun = crate::row_label::genre_noun(g).unwrap_or(g);
@@ -395,10 +412,23 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     let (gem_title, gem_key) = [("Under the Radar", "row.np_under_the_radar"), ("Hidden Gems", "row.np_hidden_gems"), ("Worth a Closer Look", "row.np_closer_look")][slot % 3];
     rows.push(RowOut { title: gem_title.into(), key: gem_key, args: Value::Null, row_type: "vibe", kind: "gems", items: mixed });
 
-    // the order of the rows moves a little with the session and the slot: the two charts stay first, the rest may shift a few places
-    let mut keyed: Vec<(f32, RowOut)> = rows.into_iter().enumerate().map(|(i, r)| (if i < 2 { i as f32 } else { i as f32 + (crate::page::entry_noise(session, i + slot * 31) - 0.5) * 6.0 }, r)).collect();
+    // the order of the other rows moves a little with the session and the slot
+    let mut keyed: Vec<(f32, RowOut)> = rows.into_iter().enumerate().map(|(i, r)| (i as f32 + (crate::page::entry_noise(session, i + slot * 31) - 0.5) * 6.0, r)).collect();
     keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    keyed.into_iter().map(|(_, r)| r).collect()
+    let mut ordered: Vec<RowOut> = keyed.into_iter().map(|(_, r)| r).collect();
+
+    // between one and four charts (the nearest to the news first), spread out: the first after zero to two other rows, then every three to five rows, never next to each other
+    charts.retain(|c| !c.items.is_empty());
+    let want = 1 + (crate::page::entry_noise(session, 7 + slot) * 4.0) as usize;
+    let mut chosen: Vec<(f32, RowOut)> = charts.into_iter().enumerate().map(|(i, c)| (i as f32 * 0.6 + crate::page::entry_noise(session, 100 + i + slot * 13) * 2.0, c)).collect();
+    chosen.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let start = (crate::page::entry_noise(session, 11 + slot) * 3.0) as usize;
+    let gap = 3 + (crate::page::entry_noise(session, 13 + slot) * 3.0) as usize;
+    for (n, (_, chart_row)) in chosen.into_iter().take(want).enumerate() {
+        let at = (start + n * gap).min(ordered.len());
+        ordered.insert(at, chart_row);
+    }
+    ordered
 }
 
 /// `take` of the first `pool` candidates, chosen by their place plus noise from the session and the slot.
