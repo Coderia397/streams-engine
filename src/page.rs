@@ -5,7 +5,6 @@ use crate::centroid::CentroidVault;
 use crate::cluster::ClusterSeeds;
 use crate::hnsw::{HnswIndex, ENGINE_READY};
 use crate::mmr::{filter_outliers, greedy_mmr, mean_pairwise_cosine};
-use crate::mood::MoodVault;
 use crate::quality::rerank_score;
 use crate::taxonomy::TaxonomyStore;
 use crate::titles::{byw_title, clamp_words, derive_title};
@@ -227,7 +226,6 @@ pub struct PageContext<'a> {
     pub vectors:     &'a VectorStore,
     pub hnsw:        &'a RwLock<Option<HnswIndex>>,
     /// Index over the title profile vectors; row definitions are matched against it when it is built
-    pub profile_hnsw: &'a RwLock<Option<HnswIndex>>,
     pub seeds:       &'a ClusterSeeds,
     /// World, atom and theme group of every title (single database)
     pub groups:      &'a crate::groups::GroupMap,
@@ -238,7 +236,6 @@ pub struct PageContext<'a> {
     pub late_night:  bool,
     pub vault:       &'a CentroidVault,
     pub taxonomy:    &'a TaxonomyStore,
-    pub mood_vault:  &'a MoodVault,
     pub profiles:    &'a crate::profiles::ProfileStore,
     /// Release dates of new and upcoming titles, and today's date (YYYY-MM-DD) to compare them with
     pub fresh:       &'a crate::fresh::FreshStore,
@@ -455,11 +452,8 @@ impl<'a> PageContext<'a> {
         rows
     }
 
-    /// The vector a seasonal row ranks a title by: its profile vector when profiles carry vectors, otherwise its catalog vector (the single database has no profile vectors).
+    /// The vector a seasonal row ranks a title by: its catalog vector.
     fn season_vector(&self, id: u32) -> Option<Vec<f32>> {
-        if !self.profiles.vectors.is_empty() {
-            return self.profiles.vector(id);
-        }
         let idx = self.vectors.index_of(id)?;
         if self.vectors.is_zero_row(idx) { return None; }
         Some(self.vectors.get_f32(idx))
@@ -751,7 +745,6 @@ impl<'a> PageContext<'a> {
         );
 
         for (ti, &row_idx) in thematic_row_indices.iter().enumerate() {
-            let centroid = &thematic_centroids[ti];
             let dominant_genre = majority_genre(
                 rows[row_idx].items.iter().map(|item| item.genres.as_slice()),
             );
@@ -763,9 +756,9 @@ impl<'a> PageContext<'a> {
             );
             let has_taxonomy = taxonomy_title.is_some();
             let mut derived = derive_title(
-                centroid, &dominant_genre, second.as_deref(), era.as_deref(),
+                &dominant_genre, second.as_deref(), era.as_deref(),
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
-                taxonomy_title, self.mood_vault,
+                taxonomy_title,
             );
             let row_catalog: Vec<&CatalogItem> = rows[row_idx].items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
             let mut candidates = if has_taxonomy && !derived.is_empty() { vec![derived.remove(0)] } else { Vec::new() };
@@ -868,14 +861,12 @@ impl<'a> PageContext<'a> {
 
         // 2. Retrieve titles per shortlisted entry in parallel
         struct Cand { idx: usize, exploit: f32, explore: f32, hits: Vec<u32> }
-        let main_guard = self.hnsw.read().await;
-        let prof_guard = self.profile_hnsw.read().await;
-        let guard: &Option<HnswIndex> = if prof_guard.is_some() { &prof_guard } else { &main_guard };
+        let guard = self.hnsw.read().await;
         let cands: Vec<Cand> = pick_idx
             .par_iter()
             .filter_map(|&idx| {
                 let e = &self.taxonomy.entries[idx];
-                let hits = self.retrieve_sync(guard, &e.embedding, ANN_ENTRY_K);
+                let hits = self.retrieve_sync(&guard, &e.embedding, ANN_ENTRY_K);
                 let good: Vec<(&CatalogItem, f32)> = hits
                     .iter()
                     .filter_map(|(id, sim)| self.catalog.get(id).map(|i| (i, *sim)))
@@ -898,8 +889,7 @@ impl<'a> PageContext<'a> {
                 })
             })
             .collect();
-        drop(prof_guard);
-        drop(main_guard);
+        drop(guard);
         let t_retrieve = t0.elapsed();
         if std::env::var("STREAMS_DEBUG_ENTRIES").is_ok() {
             eprintln!("entries: eligible {n_eligible}, shortlisted {}, with enough titles {} (surface {})", pick_idx.len(), cands.len(), self.surface);
@@ -1337,15 +1327,9 @@ impl<'a> PageContext<'a> {
         }
         pool.truncate(POOL);
 
-        // With title profiles the page is built in the space of what the titles are about (the profile vectors); a title with no profile is left
-        // out. Without them it uses the catalog vectors as before.
-        let profile_mode = !self.profiles.vectors.is_empty();
         let items: Vec<(&CatalogItem, Vec<f32>)> = pool
             .into_iter()
             .filter_map(|i| {
-                if profile_mode {
-                    return self.profiles.vector(i.id).map(|v| (i, v));
-                }
                 let idx = self.vectors.index_of(i.id)?;
                 if self.vectors.is_zero_row(idx) {
                     return None;
@@ -1594,9 +1578,9 @@ impl<'a> PageContext<'a> {
                 }
             }
             candidates.extend(derive_title(
-                &centers[c], &dom, second.as_deref(), era.as_deref(),
+                &dom, second.as_deref(), era.as_deref(),
                 rows[row_idx].items.first().map(|i| i.title.as_str()),
-                None, self.mood_vault,
+                None,
             ));
             // the name of the group the row is built from, or of the group most of its titles belong to, comes first when it keeps its promise
             let group_name = cluster_group.get(c).and_then(|key| self.group_names.get(key).cloned()).or_else(|| self.majority_group_name(&row_catalog));

@@ -1,22 +1,18 @@
-use crate::mood::MoodVault;
-
 /// Generate a row title. Title is always derived AFTER retrieval (Spotify principle).
 ///
 /// Chain (first non-None wins):
 /// 1. taxonomy Hungarian assignment title (see taxonomy.rs) — passed as `taxonomy_title`
-/// 2. `{mood_adj} {genre}` — e.g. "Dark Crime", "Epic Sci-Fi", "Heartfelt Drama"
+/// 2. era and genre mix ("90s Crime", "Crime & Thriller")
 /// 3. `{genre} Picks`
 /// 4. `More {genre}`
 ///
 /// The caller (page.rs) handles uniqueness — this function just generates candidates.
 pub fn derive_title(
-    cluster_centroid: &[f32],
     dominant_genre: &str,
     second_genre: Option<&str>,
     era: Option<&str>,
     anchor_title: Option<&str>,
     taxonomy_title: Option<String>,
-    mood_vault: &MoodVault,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
 
@@ -25,17 +21,7 @@ pub fn derive_title(
         candidates.push(t);
     }
 
-    // 2. Mood + Genre construction (only when the mood vocabulary is loaded)
-    if !mood_vault.mood_centroids.is_empty() {
-        let adj = mood_vault.closest(cluster_centroid);
-        if !dominant_genre.is_empty() {
-            candidates.push(format!("{adj} {dominant_genre}"));
-        } else {
-            candidates.push(adj.to_string());
-        }
-    }
-
-    // 2b. Data derived titles: era and genre mix
+    // 2. Data derived titles: era and genre mix
     if !dominant_genre.is_empty() {
         if let Some(e) = era {
             candidates.push(format!("{e} {dominant_genre}"));

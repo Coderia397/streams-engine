@@ -1,18 +1,15 @@
 //! Model written profiles of titles (ai-engine/profiles): audience, themes, tone, who it is about, LGBTQ+ presence and content flags, and
-//! the vector of each profile (Qwen3-Embedding-4B, the model of the catalog vectors, float16, 2,560 numbers).
 //!
-//! Files in the catalog folder: `profiles_v1.jsonl` (one `{"k":"movie:550","p":{...}}` per line), `profile_vectors_v1.bin` (float16, in the
-//! order of `profile_vectors_v1.keys`, one key per line). Without them the engine runs as before.
+//! File in the catalog folder: `profiles_v1.jsonl` (one `{"k":"movie:550","p":{...}}` per line). Without it the engine runs as before.
+//! Profile vectors of earlier runs (`profile_vectors_v1.*`, another embedding space) are not read.
 //!
 //! What a page may trust: `audience` and `themes` are used. `lgbtq` "present" is not trusted (the model marks too many titles, measured
 //! 143 of 1,000 on the first part, among them a late night talk show); only "central" counts.
 use crate::catalog::item_key;
-use half::f16;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
-pub const DIMS: usize = 2560;
 
 pub const KIDS: u8 = 1;
 pub const FAMILY: u8 = 2;
@@ -104,23 +101,13 @@ pub fn parse_profile(p: &Value) -> Option<TitleProfile> {
 }
 
 pub struct ProfileStore {
-    /// internal item key -> position in `profiles` and `vectors`
+    /// internal item key -> position in `profiles`
     pub index: HashMap<u32, usize>,
     pub profiles: Vec<TitleProfile>,
-    /// float16 bits, `DIMS` per profile; empty when the vectors file is missing
-    pub vectors: Vec<u16>,
     /// share of all profiles carrying each row-name tone (by display name); the baseline a row's tone is compared against
     pub tone_share: HashMap<&'static str, f32>,
     /// share of all profiles carrying each theme phrase
     pub theme_share: HashMap<String, f32>,
-    /// internal item key of each profile, in the order of `profiles` and `vectors`
-    pub keys: Vec<u32>,
-    /// Mean of all profile vectors, each vector's dot product with it, and the length of each vector after the mean is removed, so the
-    /// centred cosine of two profiles needs one dot product (raw pairs share a high baseline cosine, centred ones do not)
-    pub mean: Vec<f32>,
-    pub dot_mean: Vec<f32>,
-    pub norm_centred: Vec<f32>,
-    mean_sq: f32,
 }
 
 /// Tone words (as the model writes them) that make a good row name, with the word shown. Several spellings share one display name.
@@ -139,7 +126,7 @@ fn tone_display(word: &str) -> Option<&'static str> {
 
 impl ProfileStore {
     pub fn empty() -> Self {
-        Self { index: HashMap::new(), profiles: Vec::new(), vectors: Vec::new(), tone_share: HashMap::new(), theme_share: HashMap::new(), keys: Vec::new(), mean: Vec::new(), dot_mean: Vec::new(), norm_centred: Vec::new(), mean_sq: 0.0 }
+        Self { index: HashMap::new(), profiles: Vec::new(), tone_share: HashMap::new(), theme_share: HashMap::new() }
     }
 
     /// The theme that sets a row apart: carried by at least `min_share` of the row's titles and at least `min_lift` times more often than across
@@ -205,106 +192,19 @@ impl ProfileStore {
         self.index.get(&key).map(|&i| &self.profiles[i])
     }
 
-    /// Computes the mean vector and the per vector numbers behind `nearest`.
-    fn prepare_centring(&mut self) {
-        use rayon::prelude::*;
-        let n = self.vectors.len() / DIMS;
-        if n == 0 {
-            return;
-        }
-        let mut mean = vec![0f64; DIMS];
-        for row in self.vectors.as_chunks::<DIMS>().0.iter() {
-            for (m, &b) in mean.iter_mut().zip(row) {
-                *m += f16::from_bits(b).to_f32() as f64;
-            }
-        }
-        let mean: Vec<f32> = mean.into_iter().map(|m| (m / n as f64) as f32).collect();
-        let mean_sq: f32 = mean.iter().map(|m| m * m).sum();
-        let stats: Vec<(f32, f32)> = self
-            .vectors
-            .par_chunks_exact(DIMS)
-            .map(|row| {
-                let (mut dm, mut sq) = (0f32, 0f32);
-                for (&b, &m) in row.iter().zip(&mean) {
-                    let x = f16::from_bits(b).to_f32();
-                    dm += x * m;
-                    sq += x * x;
-                }
-                // |x - m|^2 = |x|^2 - 2 x.m + m.m
-                (dm, (sq - 2.0 * dm + mean_sq).max(1e-12).sqrt())
-            })
-            .collect();
-        self.dot_mean = stats.iter().map(|s| s.0).collect();
-        self.norm_centred = stats.iter().map(|s| s.1).collect();
-        self.mean = mean;
-        self.mean_sq = mean_sq;
-    }
-
-    /// The profiles most like the one of `key` by centred cosine, best first, the title itself left out. Empty when it has no profile vector.
-    pub fn nearest(&self, key: u32, k: usize) -> Vec<(u32, f32)> {
-        use rayon::prelude::*;
-        let Some(&pos) = self.index.get(&key) else { return Vec::new() };
-        if self.norm_centred.len() != self.profiles.len() || self.vectors.len() < (pos + 1) * DIMS {
-            return Vec::new();
-        }
-        let a: Vec<f32> = self.vectors[pos * DIMS..(pos + 1) * DIMS].iter().map(|&b| f16::from_bits(b).to_f32()).collect();
-        let (am, an) = (self.dot_mean[pos], self.norm_centred[pos]);
-        let mut scored: Vec<(u32, f32)> = self
-            .vectors
-            .par_chunks_exact(DIMS)
-            .enumerate()
-            .filter(|(i, _)| *i != pos)
-            .map(|(i, row)| {
-                let dot: f32 = row.iter().zip(&a).map(|(&b, &x)| f16::from_bits(b).to_f32() * x).sum();
-                (self.keys[i], (dot - am - self.dot_mean[i] + self.mean_sq) / (an * self.norm_centred[i]))
-            })
-            .collect();
-        scored.sort_unstable_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then(x.0.cmp(&y.0)));
-        scored.truncate(k);
-        scored
-    }
-
-    /// Centred cosine of the profiles of two titles, None when either has no profile vector.
-    pub fn centred_cos(&self, a: u32, b: u32) -> Option<f32> {
-        let (&pa, &pb) = (self.index.get(&a)?, self.index.get(&b)?);
-        if self.norm_centred.len() != self.profiles.len() || self.vectors.len() < (pa.max(pb) + 1) * DIMS {
-            return None;
-        }
-        let dot: f32 = self.vectors[pa * DIMS..(pa + 1) * DIMS].iter().zip(&self.vectors[pb * DIMS..(pb + 1) * DIMS]).map(|(&x, &y)| f16::from_bits(x).to_f32() * f16::from_bits(y).to_f32()).sum();
-        Some((dot - self.dot_mean[pa] - self.dot_mean[pb] + self.mean_sq) / (self.norm_centred[pa] * self.norm_centred[pb]))
-    }
-
-    pub fn vector(&self, key: u32) -> Option<Vec<f32>> {
-        let i = *self.index.get(&key)?;
-        let s = self.vectors.get(i * DIMS..(i + 1) * DIMS)?;
-        Some(s.iter().map(|&b| f16::from_bits(b).to_f32()).collect())
-    }
-
     /// Reads the profile files from the catalog folder. Missing files give an empty store.
     pub fn load(dir: &str) -> Self {
         let dir = Path::new(dir);
         let Ok(text) = std::fs::read_to_string(dir.join("profiles_v1.jsonl")) else { return Self::empty() };
-        let keys: Vec<String> = std::fs::read_to_string(dir.join("profile_vectors_v1.keys")).map(|t| t.lines().map(str::to_string).collect()).unwrap_or_default();
-        let bytes = std::fs::read(dir.join("profile_vectors_v1.bin")).unwrap_or_default();
-        let vector_rows = if bytes.len() == keys.len() * DIMS * 2 { keys.len() } else { 0 };
-        let vector_pos: HashMap<&str, usize> = keys.iter().enumerate().take(vector_rows).map(|(i, k)| (k.as_str(), i)).collect();
         let mut store = Self::empty();
-        let mut vectors: Vec<u16> = Vec::new();
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let Ok(row) = serde_json::from_str::<Value>(line) else { continue };
             let (Some(k), Some(p)) = (row.get("k").and_then(Value::as_str), row.get("p")) else { continue };
             let (Some(profile), Some((media, id))) = (parse_profile(p), k.split_once(':')) else { continue };
             let Ok(id) = id.parse::<u32>() else { continue };
-            // with a vector file every kept profile has its vector (rows stay aligned); without one the profiles load as text only
-            let pos = vector_pos.get(k).copied();
-            if vector_rows > 0 && pos.is_none() { continue; }
             store.index.insert(item_key(media, id), store.profiles.len());
-            store.keys.push(item_key(media, id));
             store.profiles.push(profile);
-            if let Some(pos) = pos { vectors.extend((0..DIMS).map(|d| u16::from_le_bytes([bytes[(pos * DIMS + d) * 2], bytes[(pos * DIMS + d) * 2 + 1]]))); }
         }
-        store.vectors = vectors;
-        store.prepare_centring();
         let mut tone_count: HashMap<&'static str, usize> = HashMap::new();
         for p in &store.profiles {
             let mut seen: Vec<&'static str> = Vec::new();
@@ -412,7 +312,7 @@ mod tests {
     #[test]
     fn missing_files_give_an_empty_store() {
         let s = ProfileStore::load("/definitely/not/here");
-        assert!(s.profiles.is_empty() && s.vector(1).is_none());
+        assert!(s.profiles.is_empty() && s.get(1).is_none());
     }
 
     #[test]

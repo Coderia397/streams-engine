@@ -25,7 +25,6 @@ pub struct RecsQuery {
     /// Tuning only (ai-engine/scripts/eval_recs.py): weight of popularity, of rating, and of the profile similarity in the mean of the two similarities
     pub w_pop: Option<f32>,
     pub w_rate: Option<f32>,
-    pub w_profile: Option<f32>,
     /// Tuning: boost for a title in the anchor's world level 2 group, atom and theme group
     pub w_g2: Option<f32>,
     pub w_atom: Option<f32>,
@@ -38,7 +37,6 @@ const REC_POPULARITY_WEIGHT: f32 = 0.3;
 const REC_RATING_WEIGHT: f32 = 0.06;
 /// Share of the profile similarity in the mean of the two similarities. Zero: measured with eval_recs.py on 19 anchors, the text similarity alone
 /// gave 4.3 good titles in the first 10 and the profile similarity alone 1.4 (a mean of the two 2.8 to 3.8), so the profile space is only used on request.
-const REC_PROFILE_WEIGHT: f32 = 0.0;
 const REC_G2_WEIGHT: f32 = 0.0;
 const REC_ATOM_WEIGHT: f32 = 0.0;
 const REC_THEME_WEIGHT: f32 = 0.0;
@@ -82,9 +80,9 @@ pub async fn recommendations(
 
     let (w_g2, w_atom, w_theme) = (params.w_g2.unwrap_or(REC_G2_WEIGHT), params.w_atom.unwrap_or(REC_ATOM_WEIGHT), params.w_theme.unwrap_or(REC_THEME_WEIGHT));
     let anchor_groups = state.groups.get(&anchor_key).copied();
-    let (w_pop, w_rate, w_profile) = (params.w_pop.unwrap_or(REC_POPULARITY_WEIGHT), params.w_rate.unwrap_or(REC_RATING_WEIGHT), params.w_profile.unwrap_or(REC_PROFILE_WEIGHT).clamp(0.0, 1.0));
+    let (w_pop, w_rate) = (params.w_pop.unwrap_or(REC_POPULARITY_WEIGHT), params.w_rate.unwrap_or(REC_RATING_WEIGHT));
 
-    // neighbours by what the catalog text says (HNSW when ready, brute force otherwise) and by what the title is about (profile vectors)
+    // neighbours by what the catalog text says (HNSW when ready, brute force otherwise)
     let mut similar: Vec<(u32, f32)> = Vec::new();
     if ENGINE_READY.load(Ordering::Relaxed) {
         let guard = state.hnsw.read().await;
@@ -95,8 +93,7 @@ pub async fn recommendations(
     if similar.is_empty() {
         similar = state.vectors.brute_force_topk(&anchor_vec, fetch);
     }
-    let profile_near = if w_profile > 0.0 { state.profiles.nearest(anchor_key, fetch.min(160)) } else { Vec::new() };
-    let mut keys: Vec<u32> = similar.iter().map(|(k, _)| *k).chain(profile_near.iter().map(|(k, _)| *k)).filter(|k| *k != anchor_key).collect();
+    let mut keys: Vec<u32> = similar.iter().map(|(k, _)| *k).filter(|k| *k != anchor_key).collect();
     let mut seen_keys = std::collections::HashSet::new();
     keys.retain(|k| seen_keys.insert(*k));
 
@@ -104,7 +101,7 @@ pub async fn recommendations(
     let anchor_genres: Vec<&String> = anchor_item.genres.iter().collect();
     let anchor_title = crate::people::normalise(&anchor_item.title);
 
-    // score: the mean of the two similarities when the title has a profile, plus a small push for titles people watch and rate well
+    // score: the centred cosine of the catalog vectors, plus a small push for titles people watch and rate well
     let mut scored: Vec<(f32, f32, &crate::catalog::CatalogItem)> = keys
         .iter()
         .filter_map(|k| {
@@ -119,14 +116,7 @@ pub async fn recommendations(
             if item.media_type == anchor_item.media_type && crate::people::normalise(&item.title) == anchor_title {
                 return None;
             }
-            let from_text = state.vectors.index_of(*k).map(|i| dot(&anchor_c, &centred(&state, i)));
-            let from_profile = if w_profile > 0.0 { state.profiles.centred_cos(anchor_key, *k) } else { None };
-            let sim = match (from_text, from_profile) {
-                (Some(a), Some(b)) => (1.0 - w_profile) * a + w_profile * b,
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (None, None) => return None,
-            };
+            let sim = state.vectors.index_of(*k).map(|i| dot(&anchor_c, &centred(&state, i)))?;
             let quality = (item.popularity.ln_1p() / 100f32.ln_1p()).clamp(0.0, 1.0);
             let rating = ((item.vote_average - 5.0) / 4.0).clamp(0.0, 1.0);
             let group_bonus = match (anchor_groups, state.groups.get(k)) {

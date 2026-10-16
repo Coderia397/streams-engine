@@ -1,6 +1,6 @@
 /// Pointer tables for genre rows (notes/52): for every genre of the site's pickers (Home, Movies, TV) the groups that can fill rows of it, found with the engine's own genre rules
 /// and quality gates, written into the database as `genre_pointers` (one line per surface, genre and world level 2 group) and `genre_coverage` (one line per surface and genre).
-///   build-pointers --db /Users/ibrahim/streams-catalog/streams_v3.db
+///   build-pointers --db $STREAMS_CATALOG_DIR/streams_v3.db
 use anyhow::Result;
 use clap::Parser;
 use rusqlite::Connection;
