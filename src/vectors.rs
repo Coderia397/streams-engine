@@ -145,13 +145,32 @@ impl VectorStore {
 /// Cosine similarity — f32 query vs f16 stored vector (avoids materialising full f32 row).
 #[inline]
 pub fn cosine_sim_f16(query: &[f32], stored: &[f16]) -> f32 {
-    query.iter().zip(stored.iter()).map(|(q, s)| q * s.to_f32()).sum()
+    let mut acc = [0.0f32; 16];
+    let (cq, rq) = query.as_chunks::<16>();
+    let (cs, rs) = stored.as_chunks::<16>();
+    let tail: f32 = rq.iter().zip(rs).map(|(q, s)| q * s.to_f32()).sum();
+    for (q, s) in cq.iter().zip(cs) {
+        for i in 0..16 {
+            acc[i] += q[i] * s[i].to_f32();
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 /// Cosine similarity between two f32 slices.
 #[inline]
 pub fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    // sixteen independent partial sums let the compiler use SIMD (one running sum is a serial chain of adds)
+    let mut acc = [0.0f32; 16];
+    let (ca, ra) = a.as_chunks::<16>();
+    let (cb, rb) = b.as_chunks::<16>();
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    for (x, y) in ca.iter().zip(cb) {
+        for i in 0..16 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
 }
 
 /// L2-normalise a vector in-place.

@@ -66,6 +66,16 @@ const MEMBER_POOL: usize = 120;
 const ROW_SIZE: usize = 15;
 /// A genre page shows at least this many rows: when its own pool gives fewer, rows of neighbouring titles fill it up (`fill_thin_genre_page`)
 pub const THIN_PAGE_FLOOR: usize = 15;
+/// Fixed positions (zero based) of the catalog and personal rows on a page
+const SLOT_CONTINUE: usize = 0;
+const SLOT_TOP_PICKS: usize = 1;
+const SLOT_CHART: [usize; 2] = [2, 7];
+const SLOT_LIST: usize = 3;
+const SLOT_COLLECTION: [usize; 2] = [4, 11];
+const SLOT_NEW: usize = 5;
+const SLOT_ABOUT: [usize; 3] = [6, 12, 14];
+const SLOT_NEXT: usize = 9;
+const SLOT_GEMS: usize = 10;
 /// A genre page built from groups: the (level, id) of each cluster and the item indices kept
 type GroupMode = (Vec<(u8, i32)>, Vec<usize>);
 /// The titles of one group, by group id
@@ -171,6 +181,9 @@ pub struct Row {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub kind:      String,
     pub items:     Vec<RowItem>,
+    /// Extra facts of the row for the client (a collection's text and target, the title a personal row refers to); absent for ordinary rows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta:      Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -268,6 +281,8 @@ pub struct PageContext<'a> {
     pub fill_pool:   Option<&'a [u32]>,
     /// Titles a fill pass must not use again (the ones the page already shows)
     pub skip:        Option<&'a HashSet<u32>>,
+    /// What the client sent about the profile: saved, recent and liked titles (personal rows)
+    pub signals:     &'a crate::signals::Signals,
 }
 
 /// The page's genre rule. The Pride page trusts the model's profile when the title has one: LGBTQ+ must be central to the story (measured
@@ -318,7 +333,7 @@ pub fn audience_fits_with(spec: Option<&crate::genre_spec::GenreSpec>, maturity:
 }
 
 impl<'a> PageContext<'a> {
-    fn matches_filters(&self, item: &CatalogItem) -> bool {
+    pub(crate) fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.language.is_none_or(|l| language_matches(l, &item.original_language))
             && self.genre_ok(item)
@@ -331,7 +346,7 @@ impl<'a> PageContext<'a> {
         genre_ok_with(self.genre_spec, self.profiles, item)
     }
 
-    fn maturity_allows(&self, m: crate::identity::Maturity, item: &CatalogItem) -> bool {
+    pub(crate) fn maturity_allows(&self, m: crate::identity::Maturity, item: &CatalogItem) -> bool {
         maturity_allows_with(m, self.profiles, item)
     }
 
@@ -341,13 +356,13 @@ impl<'a> PageContext<'a> {
 
     /// Vote count floor: a rating from a handful of votes says nothing. Known only for pulled titles (all of the
     /// quality pool); genre pages use a lower floor so small collections survive.
-    fn reliable(&self, item: &CatalogItem) -> bool {
+    pub(crate) fn reliable(&self, item: &CatalogItem) -> bool {
         meets_vote_floor(item, self.genre_spec.is_some() || self.language.is_some())
     }
 
     /// News, talk and soap never fill default rows (a page that asks for them keeps them); seasonal titles only
     /// appear inside their window (the Halloween page lifts the Halloween rule).
-    fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
+    pub(crate) fn allowed_by_nets(&self, item: &CatalogItem) -> bool {
         use crate::catalog::{FLAG_CHRISTMAS, FLAG_HALLOWEEN, FLAG_NONSCRIPTED, FLAG_SUGGESTIVE, FLAG_WRESTLING_EVENT};
         let f = item.flags & crate::catalog::FLAGS_RULES;
         if f == 0 {
@@ -399,7 +414,7 @@ impl<'a> PageContext<'a> {
 
     /// Synchronous variant of `retrieve_candidates` for use inside rayon, with the
     /// HNSW read guard already held by the caller.
-    fn retrieve_sync(&self, index: &Option<HnswIndex>, query: &[f32], k: usize) -> Vec<(u32, f32)> {
+    pub(crate) fn retrieve_sync(&self, index: &Option<HnswIndex>, query: &[f32], k: usize) -> Vec<(u32, f32)> {
         if ENGINE_READY.load(Ordering::Relaxed) {
             if let Some(idx) = index.as_ref() {
                 if let Ok(mut results) = idx.search(query, k) {
@@ -437,6 +452,10 @@ impl<'a> PageContext<'a> {
         let mut rows = self.build_page_rows_inner().await;
         let kids = self.maturity.is_some_and(|m| m.is_kids());
         if self.genre.is_none() && self.language.is_none() && self.animation.is_none() && !kids && !self.taxonomy.entries.is_empty() {
+            // the collection rows (an event's banner, a mood) are built first so the seasonal rows take what is left
+            let used0: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let collections = self.build_collection_rows(&used0, 2);
+            rows.extend(collections);
             let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
             let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
             // sub groups of the season's pool when they exist, the flat keyword rows otherwise
@@ -452,15 +471,39 @@ impl<'a> PageContext<'a> {
             let mut extra: Vec<Row> = Vec::new();
             if self.late_night && self.genre.is_none() { extra.extend(self.build_mood_rows(&used, 2, true)); }
             let mut taken = used.clone(); extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken.insert(i.id); }));
+            // topic rows that carry only a genre name ("Comedies", "Documentary & Drama") are replaced by rows named for how their titles feel
+            let before = rows.len();
+            if self.genre.is_none() { rows.retain(|r| !(r.kind.is_empty() && r.archetype == "thematic" && is_plain_genre_title(&r.title))); }
+            let removed = before - rows.len();
             let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-            let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
+            let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3 + removed.min(8)).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
             let night = extra.len();
             let mut taken_all = taken.clone(); vibes.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
             let attrs: Vec<Row> = self.build_attribute_rows(&taken_all, 2).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
             rows = self.interleave(rows, extra, 1);
             rows = self.interleave(rows, vibes, 3 + night);
             rows = self.interleave(rows, attrs, 5 + night);
+            // one mood row among the topic rows on a page without a genre
+            if self.genre.is_none() && !self.late_night {
+                let taken_now: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+                let on_page: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+                let moods: Vec<Row> = self.build_mood_rows(&taken_now, 3, false).into_iter().filter(|r| !on_page.contains(&r.title.to_lowercase())).take(1).collect();
+                rows = self.interleave(rows, moods, 8);
+            }
         }
+        // personal rows, New Releases and collections: placed by slot in `place_charts`
+        if !kids && self.language.is_none() && self.animation.is_none() {
+            let taken_now: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let mut extra = self.build_personal_rows(&taken_now).await;
+            if self.genre.is_none() {
+                let mut taken_all = taken_now.clone();
+                extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
+                if let Some(r) = self.build_new_row(&taken_all) { r.items.iter().for_each(|i| { taken_all.insert(i.id); }); extra.push(r); }
+            }
+            rows.extend(extra);
+        }
+        // a row of fewer than 8 titles looks unfinished next to full rows
+        if self.genre.is_none() { rows.retain(|r| r.meta.is_some() || r.items.len() >= 8); }
         rows
     }
 
@@ -522,7 +565,7 @@ impl<'a> PageContext<'a> {
             if items.len() < MIN { continue; }
             items.iter().for_each(|i| { taken.insert(i.id); });
             chosen_centred.push(&e.centered);
-            rows.push(Row { title: clamp_words(&e.title, 5), archetype: "thematic".to_string(), kind: e.kind.clone(), items });
+            rows.push(Row { title: clamp_words(&e.title, 5), archetype: "thematic".to_string(), kind: e.kind.clone(), items, meta: None });
         }
         rows
     }
@@ -730,7 +773,7 @@ impl<'a> PageContext<'a> {
                 title:     "__PENDING__".to_string(), // replaced after Hungarian below
                 archetype: "thematic".to_string(),
                 kind:      String::new(),
-                items:     row_items,
+                items:     row_items, meta: None,
             });
         }
 
@@ -988,7 +1031,7 @@ impl<'a> PageContext<'a> {
                 title: clamp_words(&e.title, 5),
                 archetype: "thematic".to_string(),
                 kind: e.kind.clone(),
-                items,
+                items, meta: None,
             });
         }
         let t_fill = t0.elapsed();
@@ -1020,7 +1063,7 @@ impl<'a> PageContext<'a> {
                     title: "Top Picks for You".to_string(),
                     archetype: "top_picks".to_string(),
                     kind: String::new(),
-                    items,
+                    items, meta: None,
                 });
             }
             // After the trending row, before the thematic rows
@@ -1041,7 +1084,7 @@ impl<'a> PageContext<'a> {
     // ── Vibe, mood and seasonal rows (notes/52) ───────────────────────────────
 
     /// Filters of the page without its genre rule (a seasonal page holds titles that are near the season without carrying its keyword).
-    fn matches_filters_any_genre(&self, item: &CatalogItem) -> bool {
+    pub(crate) fn matches_filters_any_genre(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.language.is_none_or(|l| language_matches(l, &item.original_language))
             && self.audience_fits(item)
@@ -1050,7 +1093,7 @@ impl<'a> PageContext<'a> {
     }
 
     /// The titles of a list of keys that this page may show, best quality first; `any_genre` skips the page's genre rule.
-    fn eligible(&self, keys: &[u32], taken: &HashSet<u32>, any_genre: bool) -> Vec<&CatalogItem> {
+    pub(crate) fn eligible(&self, keys: &[u32], taken: &HashSet<u32>, any_genre: bool) -> Vec<&CatalogItem> {
         let mut v: Vec<&CatalogItem> = keys
             .iter()
             .filter_map(|k| self.catalog.get(k))
@@ -1060,15 +1103,22 @@ impl<'a> PageContext<'a> {
         v
     }
 
-    fn row_of(&self, title: &str, kind: &str, items: &[&CatalogItem]) -> Option<Row> {
+    /// A row of these titles in the order given (no re-ordering for variety): the profile's own lists, the new releases, the lead titles of a collection.
+    pub(crate) fn row_of_any(&self, title: &str, kind: &str, items: &[&CatalogItem]) -> Option<Row> {
+        let row_items: Vec<RowItem> = items.iter().take(ROW_SIZE).map(|i| RowItem::from_catalog(i)).collect();
+        if row_items.len() < 3 { return None; }
+        Some(Row { title: title.to_string(), archetype: "thematic".to_string(), kind: kind.to_string(), items: row_items, meta: None })
+    }
+
+    pub(crate) fn row_of(&self, title: &str, kind: &str, items: &[&CatalogItem]) -> Option<Row> {
         let ids: Vec<u32> = items.iter().take(60).map(|i| i.id).collect();
         let row_items = self.diverse_titles(&ids, ROW_SIZE);
         if row_items.len() < COHERENCE_MIN_ITEMS { return None; }
-        Some(Row { title: title.to_string(), archetype: "thematic".to_string(), kind: kind.to_string(), items: row_items })
+        Some(Row { title: title.to_string(), archetype: "thematic".to_string(), kind: kind.to_string(), items: row_items, meta: None })
     }
 
     /// A vibe name is shown only when it keeps its promise for the titles of the row and does not name the other kind of title (Series on a films page).
-    fn vibe_name_ok(&self, name: &str, items: &[&CatalogItem]) -> bool {
+    pub(crate) fn vibe_name_ok(&self, name: &str, items: &[&CatalogItem]) -> bool {
         crate::row_label::name_fits(name, items) && !entry_names_other_kind(name, self.surface)
     }
 
@@ -1136,7 +1186,7 @@ impl<'a> PageContext<'a> {
     }
 
     /// Mood rows (late night, cozy, mind-bending ...): the titles of the vibe groups that fit the mood best. On a late night page the late night moods come first.
-    fn build_mood_rows(&self, taken: &HashSet<u32>, want: usize, late_only: bool) -> Vec<Row> {
+    pub(crate) fn build_mood_rows(&self, taken: &HashSet<u32>, want: usize, late_only: bool) -> Vec<Row> {
         if want == 0 || self.vibe.moods.is_empty() { return Vec::new(); }
         let mut moods: Vec<&crate::vibe::Mood> = self.vibe.moods.iter().filter(|m| !late_only || m.late).collect();
         moods.sort_by(|a, b| entry_noise(self.session, b.id.len() + b.title.len()).partial_cmp(&entry_noise(self.session, a.id.len() + a.title.len())).unwrap_or(std::cmp::Ordering::Equal));
@@ -1187,7 +1237,7 @@ impl<'a> PageContext<'a> {
 
     /// Items of a seasonal sub group ordered by how well they fit the event (centred cosine to the event vector, plus a small quality term), the ones that do not fit left out.
     /// A sub group whose best titles fit weakly is dropped (an empty list).
-    fn season_fit<'b>(&self, event: &str, items: Vec<&'b CatalogItem>) -> Vec<&'b CatalogItem> {
+    pub(crate) fn season_fit<'b>(&self, event: &str, items: Vec<&'b CatalogItem>) -> Vec<&'b CatalogItem> {
         let Some(ev) = self.event_vector(event) else { return items };
         let mut scored: Vec<(f32, &CatalogItem)> = items
             .into_iter()
@@ -1350,10 +1400,11 @@ impl<'a> PageContext<'a> {
                 let r = self.build_moods_page();
                 if r.len() >= 4 { return r; }
             }
-            let event = match g.as_str() { "halloween" => Some("halloween"), "pride" | "lgbtq" => Some("pride"), _ => None };
+            // any calendar event that has sub groups of titles has a page of its own (halloween, pride, christmas ...)
+            let event: Option<String> = match g.as_str() { "halloween" => Some("halloween".to_string()), "pride" | "lgbtq" => Some("pride".to_string()), other if self.vibe.seasons.contains_key(other) => Some(other.to_string()), _ => None };
             if let Some(ev) = event {
                 if self.language.is_none() && self.animation.is_none() {
-                    let mut rows = self.build_event_page(ev);
+                    let mut rows = self.build_event_page(&ev);
                     if rows.len() >= 5 {
                         if rows.len() <= self.target_rows {
                             let mut used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
@@ -1631,7 +1682,7 @@ impl<'a> PageContext<'a> {
             }
             state.used_ids.extend(row_items.iter().map(|r| r.id));
             state.record_thematic(self.genre.unwrap_or("").to_string(), centers[c].clone());
-            rows.push(Row { title: "__PENDING__".to_string(), archetype: "thematic".to_string(), kind: String::new(), items: row_items });
+            rows.push(Row { title: "__PENDING__".to_string(), archetype: "thematic".to_string(), kind: String::new(), items: row_items, meta: None });
             placed.push(c);
         }
 
@@ -1695,7 +1746,7 @@ impl<'a> PageContext<'a> {
     }
 
     /// Build row items from ranked ids; no significant title word is shared by more than FRANCHISE_CAP titles.
-    fn diverse_titles(&self, ids: &[u32], n: usize) -> Vec<RowItem> {
+    pub(crate) fn diverse_titles(&self, ids: &[u32], n: usize) -> Vec<RowItem> {
         let cap = if safety_nets() { FRANCHISE_CAP } else { usize::MAX };
         let mut per: HashMap<String, usize> = HashMap::new();
         let mut out: Vec<RowItem> = Vec::with_capacity(n);
@@ -1829,46 +1880,36 @@ impl<'a> PageContext<'a> {
         }
         body.retain(|r| r.items.len() >= COHERENCE_MIN_ITEMS);
 
-        let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
-        let n = body.len().max(2) as f32 - 1.0;
-        let value = |archetype: &str, index: usize, k: usize| -> f32 {
-            match archetype {
-                "continue" => 1.5,
-                "top_picks" => 1.1,
-                "byw" => 0.95,
-                "trending" => {
-                    let base = if has_taste { CHART_BASE - CHART_TASTE_PENALTY } else { CHART_BASE };
-                    base + CHART_NOISE * (entry_noise(self.session, 10_000 + k) - 0.5)
-                }
-                // rows of a page arrive best first; value falls with that order
-                _ => 1.0 - 0.9 * (index as f32 / n),
+        // Fixed slots: the rows of the catalog layer (Top 10, New Releases, collections) and of the personal layer sit at the same positions in every session and on every profile
+        // that has them; the topic rows keep their order around them. Positions are zero based and apply once the rows exist.
+        let mut slotted: Vec<(usize, Row)> = Vec::new();
+        let mut plain: Vec<Row> = Vec::new();
+        let (mut byw_n, mut coll_n) = (0usize, 0usize);
+        for r in body {
+            match r.archetype.as_str() {
+                "continue" => slotted.push((SLOT_CONTINUE, r)),
+                "top_picks" => slotted.push((SLOT_TOP_PICKS, r)),
+                "list" => slotted.push((SLOT_LIST, r)),
+                "new" => slotted.push((SLOT_NEW, r)),
+                "next_watch" => slotted.push((SLOT_NEXT, r)),
+                "gems" => slotted.push((SLOT_GEMS, r)),
+                "byw" | "more_like" => { slotted.push((SLOT_ABOUT[byw_n.min(SLOT_ABOUT.len() - 1)], r)); byw_n += 1; }
+                "collection" => { slotted.push((SLOT_COLLECTION[coll_n.min(SLOT_COLLECTION.len() - 1)], r)); coll_n += 1; }
+                _ => plain.push(r),
             }
-        };
-        struct Entry { archetype: String, value: f32, row: Row }
-        let mut pending: Vec<Entry> = body
-            .into_iter()
-            .enumerate()
-            .map(|(i, r)| Entry { value: value(&r.archetype, i, 0), archetype: r.archetype.clone(), row: r })
-            .chain(charts.into_iter().enumerate().map(|(k, r)| Entry { value: value("trending", 0, k), archetype: "trending".to_string(), row: r }))
-            .collect();
-        let mut placed: Vec<Row> = Vec::with_capacity(pending.len());
-        let mut placed_kinds: Vec<String> = Vec::new();
-        while !pending.is_empty() {
-            let best = pending
-                .iter()
-                .enumerate()
-                .map(|(i, e)| {
-                    let alike = placed_kinds.iter().filter(|k| **k == e.archetype && e.archetype != "thematic").count() as f32;
-                    (i, e.value - SIMILAR_COST * alike)
-                })
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0)))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let e = pending.remove(best);
-            placed_kinds.push(e.archetype);
-            placed.push(e.row);
         }
-        placed
+        for (k, r) in charts.into_iter().enumerate() {
+            slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], r));
+        }
+        // equal slots (more rows than slots of a kind) go one after the other
+        slotted.sort_by_key(|(slot, _)| *slot);
+        let mut next_free = 0usize;
+        for (slot, row) in slotted {
+            let at = slot.max(next_free).min(plain.len());
+            plain.insert(at, row);
+            next_free = at + 1;
+        }
+        plain
     }
 
     // ── Row builders ──────────────────────────────────────────────────────────
@@ -1932,7 +1973,7 @@ impl<'a> PageContext<'a> {
             title:     title.to_string(),
             archetype: "trending".to_string(),
             kind:      String::new(),
-            items:     row_items,
+            items:     row_items, meta: None,
         })
     }
 
@@ -1977,7 +2018,7 @@ impl<'a> PageContext<'a> {
             title:     byw_title(&anchor_item.title),
             archetype: "byw".to_string(),
             kind:      String::new(),
-            items:     row_items,
+            items:     row_items, meta: None,
         })
     }
 }
@@ -2018,12 +2059,28 @@ fn title_words(title: &str) -> Vec<String> {
     out
 }
 
-fn entry_noise(session: &str, idx: usize) -> f32 {
+pub(crate) fn entry_noise(session: &str, idx: usize) -> f32 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     session.hash(&mut h);
     idx.hash(&mut h);
     ((h.finish() >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// A topic row title made only of genre and format words ("Comedies", "Documentary & Drama", "Thriller Picks"), which says nothing about how the titles feel.
+fn is_plain_genre_title(title: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "action", "adventure", "animation", "animated", "anime", "comedy", "comedies", "crime", "documentary", "documentaries", "drama", "dramas", "family", "fantasy", "history", "horror", "music",
+        "musical", "mystery", "mysteries", "romance", "romantic", "sci-fi", "science", "fiction", "thriller", "thrillers", "war", "western", "westerns", "reality", "kids", "films", "movies", "series",
+        "shows", "tv", "picks", "more", "&", "and", "of", "the",
+    ];
+    let mut any = false;
+    for w in title.split_whitespace() {
+        let lw = w.to_lowercase();
+        if !WORDS.contains(&lw.as_str()) { return false; }
+        any = true;
+    }
+    any
 }
 
 /// Vote count floor (see `PageContext::reliable`): 10 votes on default pages, 5 on genre pages.

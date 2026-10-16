@@ -38,6 +38,10 @@ pub struct FeedQuery {
     pub offset: Option<usize>,
     /// Local hour of the client (0 to 23). From 22 to 4 the page leads with late night moods.
     pub hour: Option<u8>,
+    /// The profile's signals (see signals.rs): saved, recent (most recent first) and liked titles as `movie:550,tv:1399`
+    pub saved: Option<String>,
+    pub recent: Option<String>,
+    pub liked: Option<String>,
 }
 
 /// Row policy derived in ai-engine/config/row_architecture.json (surfaces block).
@@ -225,6 +229,10 @@ pub async fn feed(
     }
     let late_night = params.hour.is_some_and(|h| h >= 22 || h <= 4);
     key = format!("{key}|n:{}", late_night as u8);
+    let signals = crate::signals::Signals::parse(params.saved.as_deref(), params.recent.as_deref(), params.liked.as_deref());
+    if !signals.is_empty() {
+        key = format!("{key}|g:{}", signals.fingerprint());
+    }
     // pages differ per maturity
     key = format!("{key}|m:{}|l:{}", maturity.map_or("-", |m| m.as_str()), language.as_deref().unwrap_or(""));
 
@@ -283,6 +291,7 @@ pub async fn feed(
         maturity,
         fill_pool:  None,
         skip:       None,
+        signals:    &signals,
     };
 
     let all_rows = to_client_rows(ctx.build_page().await, &session_seen, &state.profiles, &fresh);
@@ -349,14 +358,19 @@ fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &crate:
         if items.len() < MIN_ROW_ITEMS {
             continue;
         }
-        let row_type = if row.archetype == "trending" { "top_ten" } else { "vibe" };
-        out.push(json!({
+        let row_type = match row.archetype.as_str() { "trending" => "top_ten", "collection" => "collection", _ => "vibe" };
+        let mut obj = json!({
             "id":        format!("{}-{}", row.archetype, i),
             "row_type":  row_type,
-            "type":      row.kind,
+            "type":      if row.kind.is_empty() && row.archetype != "thematic" && row.archetype != "trending" { row.archetype.clone() } else { row.kind.clone() },
             "title":     row.title,
             "items":     items,
-        }));
+        });
+        // the facts of a personal or collection row (translation key and arguments of the title, the reason, a collection's text and target) sit on the row itself
+        if let (Some(serde_json::Value::Object(m)), Some(o)) = (&row.meta, obj.as_object_mut()) {
+            for (k, v) in m { o.insert(k.clone(), v.clone()); }
+        }
+        out.push(obj);
     }
     out
 }
