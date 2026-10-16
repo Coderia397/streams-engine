@@ -185,6 +185,21 @@ impl<'a> PageContext<'a> {
                 rows.push(r);
             }
         }
+        // We Think You'll Love These: near what the profile liked or saved (not what it watched last)
+        if on_home {
+            let taste_lk = self.taste_of(&sig.liked.iter().take(10).map(|k| (*k, 1.0)).chain(sig.saved.iter().take(10).map(|k| (*k, 0.8))).collect::<Vec<_>>());
+            if let Some(t) = taste_lk {
+                let keys = self.neighbour_keys(&t, 800).await;
+                let ranked = self.rank_by_taste(&keys, &used, &t, false);
+                if let Some(mut r) = self.row_of("We Think You'll Love These", "personal", &ranked) {
+                    r.archetype = "love_these".to_string();
+                    r.meta = meta("row.we_think_youll_love", json!({}), Some(json!({ "kind": "liked" })));
+                    r.items.iter().for_each(|i| { used.insert(i.id); });
+                    rows.push(r);
+                }
+            }
+            if let Some(r) = self.list_row(&sig.liked, "Familiar Favourites", "favourites", "row.familiar_favourites", "liked") { rows.push(r); }
+        }
         // Gems for You: hidden favourites near the taste, or the best of them for a new profile
         let gems = match &taste {
             Some(t) => {
@@ -219,12 +234,8 @@ impl<'a> PageContext<'a> {
         Some(r)
     }
 
-    /// Up to `want` collection rows: an event that is in season (its sub groups of titles) and a mood ("For Every Feeling"). Each carries what a banner needs: label, description,
-    /// target page and the lead titles' pictures, so the client draws the banner without art of its own.
-    pub(crate) fn build_collection_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
-        let mut rows: Vec<Row> = Vec::new();
-        let mut used = taken.clone();
-        // an event whose window is open today
+    /// The events whose calendar window is open today and that have title groups to show (Halloween in October, Pride in June).
+    pub(crate) fn active_events(&self) -> Vec<&str> {
         let mut events: Vec<&str> = Vec::new();
         for e in &self.taxonomy.entries {
             let all_year = e.season.is_none_or(|s| s.start == (1, 1) && s.end == (12, 31));
@@ -232,6 +243,21 @@ impl<'a> PageContext<'a> {
                 events.push(e.event.as_str());
             }
         }
+        events
+    }
+
+    /// Chips for the top of a page: one for each event in season, with the page it opens (the Halloween chip of the Netflix app).
+    pub fn season_chips(&self) -> Vec<serde_json::Value> {
+        self.active_events().into_iter().map(|ev| json!({ "id": ev, "label_key": format!("event.{ev}"), "label": prettify(ev), "target": event_target(ev) })).collect()
+    }
+
+    /// Up to `want` collection rows: an event that is in season (its sub groups of titles) and a mood ("For Every Feeling"). Each carries what a banner needs: label, description,
+    /// target page and the lead titles' pictures, so the client draws the banner without art of its own.
+    pub(crate) fn build_collection_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
+        let mut rows: Vec<Row> = Vec::new();
+        let mut used = taken.clone();
+        // an event whose window is open today
+        let mut events = self.active_events();
         events.sort_by(|a, b| entry_noise(self.session, b.len() * 17 + b.bytes().map(|x| x as usize).sum::<usize>()).partial_cmp(&entry_noise(self.session, a.len() * 17 + a.bytes().map(|x| x as usize).sum::<usize>())).unwrap_or(std::cmp::Ordering::Equal));
         for ev in events {
             if !rows.is_empty() { break; }

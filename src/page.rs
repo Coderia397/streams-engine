@@ -76,6 +76,8 @@ const SLOT_NEW: usize = 5;
 const SLOT_ABOUT: [usize; 3] = [6, 12, 14];
 const SLOT_NEXT: usize = 9;
 const SLOT_GEMS: usize = 10;
+const SLOT_LOVE: usize = 8;
+const SLOT_FAVOURITES: usize = 13;
 /// A genre page built from groups: the (level, id) of each cluster and the item indices kept
 type GroupMode = (Vec<(u8, i32)>, Vec<usize>);
 /// The titles of one group, by group id
@@ -502,6 +504,8 @@ impl<'a> PageContext<'a> {
             }
             rows.extend(extra);
         }
+        // a row named for adult content does not belong on a general page
+        rows.retain(|r| !is_suggestive_title(&r.title));
         // a row of fewer than 8 titles looks unfinished next to full rows
         if self.genre.is_none() { rows.retain(|r| r.meta.is_some() || r.items.len() >= 8); }
         rows
@@ -1893,6 +1897,8 @@ impl<'a> PageContext<'a> {
                 "new" => slotted.push((SLOT_NEW, r)),
                 "next_watch" => slotted.push((SLOT_NEXT, r)),
                 "gems" => slotted.push((SLOT_GEMS, r)),
+                "love_these" => slotted.push((SLOT_LOVE, r)),
+                "favourites" => slotted.push((SLOT_FAVOURITES, r)),
                 "byw" | "more_like" => { slotted.push((SLOT_ABOUT[byw_n.min(SLOT_ABOUT.len() - 1)], r)); byw_n += 1; }
                 "collection" => { slotted.push((SLOT_COLLECTION[coll_n.min(SLOT_COLLECTION.len() - 1)], r)); coll_n += 1; }
                 _ => plain.push(r),
@@ -2065,6 +2071,27 @@ pub(crate) fn entry_noise(session: &str, idx: usize) -> f32 {
     session.hash(&mut h);
     idx.hash(&mut h);
     ((h.finish() >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+/// A row title that names adult content ("Adult Film Anthologies", "Erotic Thrillers"); "Young Adult" and "Adult Animation" are fine.
+fn is_suggestive_title(title: &str) -> bool {
+    let t = title.to_lowercase();
+    ["adult film", "adult video", "adult entertainment", "adult content"].iter().any(|p| t.contains(p))
+        || t.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "erotic" | "erotica" | "sexy" | "porn" | "nudity" | "nude" | "softcore" | "hentai" | "ecchi" | "harem" | "stripper"))
+}
+
+#[cfg(test)]
+mod suggestive_tests {
+    use super::is_suggestive_title;
+
+    #[test]
+    fn adult_content_names_are_found_and_genre_names_are_kept() {
+        assert!(is_suggestive_title("Adult Film Anthologies"));
+        assert!(is_suggestive_title("Erotic Thrillers"));
+        assert!(!is_suggestive_title("Young Adult Dramas"));
+        assert!(!is_suggestive_title("Adult Animation"));
+        assert!(!is_suggestive_title("Cozy Comfort Watches"));
+    }
 }
 
 /// A topic row title made only of genre and format words ("Comedies", "Documentary & Drama", "Thriller Picks"), which says nothing about how the titles feel.

@@ -307,6 +307,7 @@ pub async fn feed(
         "offset":      offset,
         "next_offset": offset + rows.len(),
         "has_more":    has_more,
+        "chips":       if genre.is_none() && language.is_none() { ctx.season_chips() } else { Vec::new() },
         "rows":        rows,
     });
     let response_str = serde_json::to_string(&response).unwrap();
