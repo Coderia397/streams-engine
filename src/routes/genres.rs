@@ -86,9 +86,8 @@ pub async fn features(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let path = std::path::Path::new(&state.config.db_path).parent().map(|d| d.join("features.json"));
     let flags: serde_json::Value = path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
     let mut out = serde_json::Map::new();
-    for key in ["games"] {
-        out.insert(key.to_string(), json!(flags.get(key).and_then(|v| v.as_bool()).unwrap_or(false)));
-    }
+    // the flags the page knows of, each off unless the file turns it on
+    out.insert("games".to_string(), json!(flags.get("games").and_then(|v| v.as_bool()).unwrap_or(false)));
     Json(serde_json::Value::Object(out))
 }
 
