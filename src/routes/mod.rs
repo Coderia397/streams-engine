@@ -7,3 +7,4 @@ pub mod rating;
 pub mod hero;
 pub mod recommendations;
 pub mod search;
+pub mod suggestions;

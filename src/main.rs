@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/feed",            get(routes::feed::feed))
         .route("/api/hero-feed",       get(routes::hero::hero_feed))
         .route("/api/search",          get(routes::search::search))
+        .route("/api/search-suggestions", get(routes::suggestions::suggestions))
         .route("/api/recommendations", get(routes::recommendations::recommendations))
         .route("/api/feedback",        post(routes::feedback::feedback))
         .route("/api/genre-support",   get(routes::genres::genre_support))
