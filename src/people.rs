@@ -64,6 +64,28 @@ impl PeopleIndex {
         self.names.is_empty()
     }
 
+    /// The best known person whose name has `query` as a whole word (a surname or a first name typed alone: "nolan" gives Christopher Nolan, not every Nolan), with their titles,
+    /// most popular first. The weight of a person is the popularity of their five best titles, so a director of several hits beats a name that appears once. None when the
+    /// word is short or no person has three titles or more.
+    pub fn person_by_word(&self, query: &str, limit: usize) -> Option<(String, f32, Vec<u32>)> {
+        let q = normalise(query);
+        if q.chars().count() < 4 || q.contains(' ') {
+            return None;
+        }
+        let mut best: Option<(&String, f32)> = None;
+        for (name, titles) in &self.names {
+            if titles.len() < 3 || !name.split(' ').any(|w| w == q) { continue; }
+            let mut pops: Vec<f32> = titles.iter().map(|t| t.1).collect();
+            pops.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let weight: f32 = pops.iter().take(5).sum();
+            if best.is_none_or(|(_, w)| weight > w) { best = Some((name, weight)); }
+        }
+        let (name, weight) = best?;
+        let mut v: Vec<(u32, f32)> = self.names[name].clone();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        Some((name.clone(), weight, v.into_iter().take(limit).map(|(k, _)| k).collect()))
+    }
+
     /// Titles of the people the query names, most popular first. A query matches a person when the person's name is the query or starts with it
     /// (a single word must be a whole name, so a first name alone does not pull in everyone). The first element tells whether the query was an exact name.
     pub fn titles_for(&self, query: &str, limit: usize) -> (bool, Vec<u32>) {

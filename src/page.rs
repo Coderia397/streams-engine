@@ -1920,6 +1920,8 @@ impl<'a> PageContext<'a> {
                 _ => plain.push(r),
             }
         }
+        // topic rows of one genre (three horror rows in the first six) do not follow each other: rows are reordered so a dominant genre does not repeat within three rows
+        let mut plain = if self.genre.is_none() { spread_by_genre(plain) } else { plain };
         for (k, r) in charts.into_iter().enumerate() {
             slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], r));
         }
@@ -2094,6 +2096,31 @@ fn is_suggestive_title(title: &str) -> bool {
     let t = title.to_lowercase();
     ["adult film", "adult video", "adult entertainment", "adult content"].iter().any(|p| t.contains(p))
         || t.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "erotic" | "erotica" | "sexy" | "porn" | "nudity" | "nude" | "softcore" | "hentai" | "ecchi" | "harem" | "stripper"))
+}
+
+/// The genre most of a row's titles carry (at least 40 percent of them), empty when no genre leads.
+fn dominant_genre(row: &Row) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for i in &row.items {
+        for g in i.genres.iter().take(3) { *counts.entry(g.as_str()).or_insert(0) += 1; }
+    }
+    counts.into_iter().filter(|(_, n)| *n * 5 >= row.items.len() * 2).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|(g, _)| g.to_string()).unwrap_or_default()
+}
+
+/// Reorders rows (looking ahead at most eight rows) so that a row's leading genre differs from that of the three rows before it whenever the following rows allow; the order is otherwise kept.
+fn spread_by_genre(rows: Vec<Row>) -> Vec<Row> {
+    let dom: Vec<String> = rows.iter().map(dominant_genre).collect();
+    let mut slots: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
+    let mut left: Vec<usize> = (0..slots.len()).collect();
+    let mut out: Vec<Row> = Vec::with_capacity(left.len());
+    let mut recent: Vec<usize> = Vec::new();
+    while !left.is_empty() {
+        let pos = left.iter().take(8).position(|&i| dom[i].is_empty() || !recent.iter().rev().take(3).any(|&r| dom[r] == dom[i])).unwrap_or(0);
+        let i = left.remove(pos);
+        recent.push(i);
+        out.extend(slots[i].take());
+    }
+    out
 }
 
 /// A topic row title made only of genre and format words ("Comedies", "Documentary & Drama", "Thriller Picks"), which says nothing about how the titles feel.

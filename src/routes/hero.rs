@@ -61,8 +61,9 @@ fn hook_slot() -> usize {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize
 }
 
-fn hero_item_json(item: &CatalogItem) -> Value {
+fn hero_item_json(item: &CatalogItem, tags: Vec<String>) -> Value {
     json!({
+        "tags":          tags,
         "id":            item.tmdb_id,
         "media_type":    item.media_type,
         "title":         item.title,
@@ -208,7 +209,7 @@ pub async fn hero_feed(
     let items: Vec<Value> = chosen
         .iter()
         .map(|i| {
-            let mut v = hero_item_json(i);
+            let mut v = hero_item_json(i, crate::contract::item_tags(state.profiles.get(i.id), &i.genres, 3));
             v["hooks"] = Value::Array(crate::hooks::hero_hooks(i, &env));
             v
         })

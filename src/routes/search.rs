@@ -36,21 +36,60 @@ fn title_index(catalog: &Arc<crate::catalog::CatalogMap>) -> Arc<TitleIndex> {
 
 /// Keys of titles whose words all match the query (the last word may be unfinished), exact title first, then titles starting with the query,
 /// then the most popular.
-fn title_matches(index: &TitleIndex, qn: &str, limit: usize) -> Vec<u32> {
+fn title_matches(index: &TitleIndex, qn: &str, aliases: &[Vec<String>], limit: usize) -> Vec<u32> {
+    let mut hits = title_scored(index, qn);
+    // "dr who" also finds "Doctor Who": the query is repeated with each word replaced by the other words of its alias group, the hits compete on the same score
+    for variant in alias_variants(qn, aliases) {
+        hits.extend(title_scored(index, &variant));
+    }
+    hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    hits.dedup_by_key(|h| h.1);
+    hits.into_iter().take(limit).map(|h| h.1).collect()
+}
+
+/// The groups of words that mean the same in a title (`search_aliases.json` next to the database: `[["dr", "doctor"], ["mr", "mister"]]`), read on every request so the file can be edited live.
+fn load_aliases(db_path: &str) -> Vec<Vec<String>> {
+    std::path::Path::new(db_path).parent()
+        .and_then(|d| std::fs::read_to_string(d.join("search_aliases.json")).ok())
+        .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(&t).ok())
+        .map(|groups| groups.into_iter().map(|g| g.iter().map(|w| normalise(w)).collect()).collect())
+        .unwrap_or_default()
+}
+
+/// The query with one word swapped for each other member of its alias group (the last, unfinished word is left alone).
+fn alias_variants(qn: &str, aliases: &[Vec<String>]) -> Vec<String> {
+    let words: Vec<&str> = qn.split(' ').filter(|w| !w.is_empty()).collect();
+    let mut out = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        for group in aliases.iter().filter(|g| g.iter().any(|m| m == w)) {
+            for other in group.iter().filter(|m| m.as_str() != *w) {
+                let mut v = words.clone();
+                v[i] = other;
+                out.push(v.join(" "));
+            }
+        }
+    }
+    out
+}
+
+fn title_scored(index: &TitleIndex, qn: &str) -> Vec<(f32, u32)> {
     let words: Vec<&str> = qn.split(' ').filter(|w| !w.is_empty()).collect();
     let Some((last, head)) = words.split_last() else { return Vec::new() };
     let exact = format!(" {qn} ");
     let starts = format!(" {qn}");
     let head_pats: Vec<String> = head.iter().map(|w| format!(" {w} ")).collect();
     let last_pat = format!(" {last}");
-    let mut hits: Vec<(u8, f32, u32)> = index
+    // a score instead of tiers alone: an exact title, a title that starts with the query, a title that has the words; added to it the weight of how well known the title is, so
+    // a popular title that starts with the query ("Stranger Things" for "stranger") comes before an obscure one that is exactly the query
+    index
         .rows
         .iter()
         .filter(|(_, _, t)| t.contains(&last_pat) && head_pats.iter().all(|p| t.contains(p.as_str())))
-        .map(|(k, pop, t)| (if *t == exact { 0 } else if t.starts_with(&starts) { 1 } else { 2 }, *pop, *k))
-        .collect();
-    hits.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)).then(a.2.cmp(&b.2)));
-    hits.into_iter().take(limit).map(|h| h.2).collect()
+        .map(|(k, pop, t)| {
+            let tier = if *t == exact { 3.0 } else if t.starts_with(&starts) { 1.6 } else { 0.0 };
+            (tier + (1.0 + pop.max(0.0)).ln(), *k)
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -93,7 +132,8 @@ pub async fn search(
     // 1. titles whose words match, from memory; matches elsewhere in the text (overview, genres, director) only when titles are few
     let qn = normalise(&q);
     let index = title_index(&catalog);
-    let title_keys: Vec<u32> = title_matches(&index, &qn, limit);
+    let aliases = load_aliases(&state.config.db_path);
+    let title_keys: Vec<u32> = title_matches(&index, &qn, &aliases, limit);
     let other_keys: Vec<u32> = if title_keys.len() < 5 {
         let db_path = state.config.db_path.clone();
         let q_clone = q.clone();
@@ -132,13 +172,29 @@ pub async fn search(
         (all, Vec::new())
     };
 
+    // a surname or first name typed alone ("nolan") lists the best known person with that word in their name, when the titles found are not well known themselves
+    let word_person = if !exact_person && person_keys.is_empty() { state.people.person_by_word(&q, 24) } else { None };
+    let best_title_pop = title_keys.iter().filter_map(|k| catalog.get(k)).map(|i| i.popularity).fold(0.0f32, f32::max);
+    let word_person_first = word_person.as_ref().is_some_and(|(_, weight, _)| *weight > 60.0 && best_title_pop < 40.0);
+    let word_keys: Vec<u32> = word_person.map(|(_, _, k)| k).unwrap_or_default();
+
+    // a description ("movies about space", "scary", "funny") finds the topic rows that describe it: their titles follow the titles found by name
+    let topic = state.topics.match_query(&qn).into_iter().next();
+    let topic_keys: Vec<u32> = topic
+        .and_then(|(slug, _)| catalog.topic_keys.get(slug))
+        .map(|keys| keys.iter().filter_map(|k| catalog.get(k)).filter(|i| i.popularity >= 1.0).take(30).map(|i| i.id).collect())
+        .unwrap_or_default();
+    let topic_json = topic.and_then(|(slug, _)| state.topics.topics.get(slug).map(|t| json!({ "id": slug, "key": format!("topic.{slug}"), "name": t.name })));
+
     // a name typed in full lists that person's titles first, unless it is also the name of a title (one word such as "Prince")
     let named_title = title_keys.iter().filter_map(|k| catalog.get(k)).any(|i| normalise(&i.title) == qn);
     let person_first = exact_person && (qn.contains(' ') || !named_title);
     let ordered: Vec<u32> = if person_first {
-        person_keys.iter().take(12).chain(title_keys.iter()).chain(person_keys.iter().skip(12)).chain(other_keys.iter()).copied().collect()
+        person_keys.iter().take(12).chain(title_keys.iter()).chain(person_keys.iter().skip(12)).chain(other_keys.iter()).chain(topic_keys.iter()).copied().collect()
+    } else if word_person_first {
+        word_keys.iter().take(12).chain(title_keys.iter()).chain(word_keys.iter().skip(12)).chain(person_keys.iter()).chain(other_keys.iter()).chain(topic_keys.iter()).copied().collect()
     } else {
-        title_keys.iter().chain(person_keys.iter()).chain(fuzzy_keys.iter()).chain(other_keys.iter()).copied().collect()
+        title_keys.iter().chain(person_keys.iter()).chain(fuzzy_keys.iter()).chain(word_keys.iter().take(8)).chain(other_keys.iter()).chain(topic_keys.iter()).copied().collect()
     };
     let mut seen: HashSet<u32> = HashSet::new();
     let results: Vec<Value> = ordered
@@ -150,7 +206,7 @@ pub async fn search(
         .map(result_json)
         .collect();
 
-    Json(json!({"results": results, "query": q}))
+    Json(json!({"results": results, "query": q, "topic": if results.is_empty() { Value::Null } else { topic_json.unwrap_or(Value::Null) }}))
 }
 
 /// Internal item keys of titles whose overview, genres or director hold the query as a phrase, best text match first.
