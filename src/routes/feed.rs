@@ -66,11 +66,13 @@ pub fn genre_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::pro
                 && crate::page::genre_ok_with(Some(spec), profiles, i)
                 && crate::page::audience_fits_with(Some(spec), maturity, profiles, i)
                 && maturity.is_none_or(|m| crate::page::maturity_allows_with(m, profiles, i))
-                && crate::page::passes_member_quality(i)
+                && crate::page::member_quality_for(Some(spec), i)
                 && crate::page::meets_vote_floor(i, true)
         })
         .count();
-    (pool / (ROW_TITLES * SESSION_TURNOVER)).min(NETFLIX_ROWS_CAP)
+    // a judged niche page is small by nature: its titles may repeat across two visits
+    let per_row = if spec.is_judged() { ROW_TITLES } else { ROW_TITLES * SESSION_TURNOVER };
+    (pool / per_row).min(NETFLIX_ROWS_CAP)
 }
 
 /// Rows a language page can support: the quality titles in that language the profile may see, 30 per row.
@@ -284,6 +286,7 @@ pub async fn feed(
         vault:      &state.vault,
         taxonomy:   &state.taxonomy,
         profiles:   &state.profiles,
+        topics:     &state.topics,
         fresh:      &fresh,
         today_ymd:  crate::fresh::ymd(crate::fresh::today_days()),
         language:   language.as_deref(),

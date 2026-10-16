@@ -82,6 +82,12 @@ impl GenreSpec {
         }
     }
 
+    /// Whether the page's members come from the judged lists (`categories_v1.json` is loaded and this page is one of its categories).
+    pub fn is_judged(&self) -> bool {
+        use GenreSpec::*;
+        crate::catalog::CATEGORIES_LOADED.load(std::sync::atomic::Ordering::Relaxed) && matches!(self, BlackStories | Cult | Halloween | Independent | Lgbtq | ScienceNature | Sports | StandUp | ChatShows)
+    }
+
     pub fn matches(&self, it: &CatalogItem) -> bool {
         use GenreSpec::*;
         // the pages whose membership was judged on Colab use the judged list alone; the keyword rules below only propose candidates

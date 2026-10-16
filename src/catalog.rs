@@ -141,6 +141,8 @@ pub struct Catalog {
     pub attr_keys: HashMap<&'static str, Vec<u32>>,
     /// Quality titles that few have found yet (`personal::is_gem`), best quality first
     pub gem_keys: Vec<u32>,
+    /// Per topic slug (`topics_v1.json`) the titles the judge accepted, best quality first
+    pub topic_keys: HashMap<String, Vec<u32>>,
 }
 
 impl Catalog {
@@ -157,7 +159,14 @@ impl Catalog {
         let mut gems: Vec<&CatalogItem> = items.values().filter(|i| crate::page::passes_member_quality(i) && crate::personal::is_gem(i)).collect();
         crate::quality::sort_by_quality(&mut gems);
         let gem_keys = gems.into_iter().map(|i| i.id).collect();
-        Self { items, chart_keys, attr_keys, gem_keys }
+        let mut by_topic: HashMap<String, Vec<&CatalogItem>> = HashMap::new();
+        for i in items.values() {
+            for k in &i.keywords {
+                if let Some(slug) = k.strip_prefix("topic:") { by_topic.entry(slug.to_string()).or_default().push(i); }
+            }
+        }
+        let topic_keys = by_topic.into_iter().map(|(slug, mut v)| { crate::quality::sort_by_quality(&mut v); (slug, v.into_iter().map(|i| i.id).collect()) }).collect();
+        Self { items, chart_keys, attr_keys, gem_keys, topic_keys }
     }
 }
 

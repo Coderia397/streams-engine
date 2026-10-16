@@ -27,6 +27,8 @@ pub struct AppState {
     pub taxonomy:   Arc<TaxonomyStore>,
     /// Model written title profiles and their vectors (empty when the files are missing)
     pub profiles:   Arc<crate::profiles::ProfileStore>,
+    /// Names of the topic rows (`topics_meta.json`), empty when the file is missing
+    pub topics:     Arc<crate::topics::TopicStore>,
     /// New, upcoming and trending titles with real release dates (fresh.json, re-read when it changes)
     pub fresh:      crate::fresh::SharedFresh,
     /// Directors and top billed cast to their titles, for searching by person
@@ -135,6 +137,8 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     );
 
     let profiles = Arc::new(profiles);
+    let topics = Arc::new(crate::topics::TopicStore::load(&profile_dir));
+    info!("Topic rows: {} topics", topics.topics.len());
     info!("Title profiles: {}", profiles.profiles.len());
 
     info!("Fresh titles: {} ({})", fresh_store.items.len(), fresh_store.generated);
@@ -157,6 +161,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         vault,
         taxonomy,
         profiles,
+        topics,
         fresh,
         people,
         feed_cache,

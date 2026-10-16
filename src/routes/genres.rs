@@ -38,6 +38,34 @@ pub async fn genre_support(
 }
 
 #[derive(Deserialize)]
+pub struct GenreListQuery {
+    pub surface: Option<String>,
+    pub rating: Option<String>,
+}
+
+/// GET /api/genre-list?surface=movie|tv&rating=PG: the genre pages of a surface in picker order with the id of their address (`/browse/genre/<id>?bc=<page id>`), and for this profile
+/// how many rows each can fill and whether it is offered, so a client does not keep a list of its own.
+pub async fn genre_list(
+    State(state): State<Arc<AppState>>,
+    MaybeCaller(caller): MaybeCaller,
+    Query(q): Query<GenreListQuery>,
+) -> impl IntoResponse {
+    let maturity = maturity_of(&caller).or_else(|| q.rating.as_deref().and_then(Maturity::from_rating)).or(Some(Maturity::Adult));
+    let surface = if matches!(q.surface.as_deref(), Some("tv") | Some("series")) { "tv" } else { "movie" };
+    let catalog = state.catalog.load();
+    let genres: Vec<serde_json::Value> = crate::genre_pages::pages(surface)
+        .iter()
+        .map(|(id, name)| {
+            let spec = crate::genre_spec::resolve(name, surface);
+            let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, surface, &spec, maturity);
+            json!({ "id": id, "name": name, "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS })
+        })
+        .collect();
+    let page = if surface == "tv" { crate::genre_pages::SERIES_PAGE_ID } else { crate::genre_pages::FILMS_PAGE_ID };
+    Json(json!({ "surface": surface, "page_id": page, "genres": genres }))
+}
+
+#[derive(Deserialize)]
 pub struct LanguageSupportQuery {
     pub surface: Option<String>,
     /// Comma separated original language codes (at most 60)

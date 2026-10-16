@@ -257,6 +257,7 @@ pub struct PageContext<'a> {
     pub vault:       &'a CentroidVault,
     pub taxonomy:    &'a TaxonomyStore,
     pub profiles:    &'a crate::profiles::ProfileStore,
+    pub topics:      &'a crate::topics::TopicStore,
     /// Release dates of new and upcoming titles, and today's date (YYYY-MM-DD) to compare them with
     pub fresh:       &'a crate::fresh::FreshStore,
     pub today_ymd:   String,
@@ -485,6 +486,11 @@ impl<'a> PageContext<'a> {
             rows = self.interleave(rows, extra, 1);
             rows = self.interleave(rows, vibes, 3 + night);
             rows = self.interleave(rows, attrs, 5 + night);
+            // topic rows (what the titles are about), a few for each page
+            let on_page: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+            let taken_topics: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let topic_rows = self.build_topic_rows(&taken_topics, if self.genre.is_none() { 4 } else { 3 }, &on_page);
+            rows = self.interleave(rows, topic_rows, 4 + night);
             // one mood row among the topic rows on a page without a genre
             if self.genre.is_none() && !self.late_night {
                 let taken_now: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
@@ -554,7 +560,7 @@ impl<'a> PageContext<'a> {
                 } else {
                     !e.keywords.is_empty() && item.keywords.iter().any(|k| e.keywords.iter().any(|w| w == k))
                 };
-                if !in_season || taken.contains(&item.id) || !passes_member_quality(item) || !self.reliable(item) || !self.matches_filters(item) {
+                if !in_season || taken.contains(&item.id) || !self.member_ok(item) || !self.reliable(item) || !self.matches_filters(item) {
                     continue;
                 }
                 let sim = self.season_vector(item.id).map(|v| cosine_sim(&v, &e.embedding)).unwrap_or(0.0);
@@ -656,7 +662,7 @@ impl<'a> PageContext<'a> {
                 .member_ids
                 .iter()
                 .filter_map(|id| self.catalog.get(id))
-                .filter(|item| self.matches_filters(item) && passes_member_quality(item) && self.reliable(item))
+                .filter(|item| self.matches_filters(item) && self.member_ok(item) && self.reliable(item))
                 .collect();
 
             if cand_items.is_empty() {
@@ -930,7 +936,7 @@ impl<'a> PageContext<'a> {
                 let good: Vec<(&CatalogItem, f32)> = hits
                     .iter()
                     .filter_map(|(id, sim)| self.catalog.get(id).map(|i| (i, *sim)))
-                    .filter(|(i, _)| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
+                    .filter(|(i, _)| self.matches_filters(i) && self.member_ok(i) && self.reliable(i))
                     .collect();
                 if good.len() < MIN_ROW {
                     return None;
@@ -1050,7 +1056,7 @@ impl<'a> PageContext<'a> {
             let cand_vecs: Vec<(u32, Vec<f32>)> = hits
                 .iter()
                 .filter_map(|(id, _)| self.catalog.get(id))
-                .filter(|i| self.matches_filters(i) && passes_member_quality(i) && self.reliable(i))
+                .filter(|i| self.matches_filters(i) && self.member_ok(i) && self.reliable(i))
                 .take(ROW_SIZE * 3)
                 .filter_map(|i| {
                     let idx = self.vectors.index_of(i.id)?;
@@ -1097,11 +1103,16 @@ impl<'a> PageContext<'a> {
     }
 
     /// The titles of a list of keys that this page may show, best quality first; `any_genre` skips the page's genre rule.
+    /// The quality gate of this page (see `member_quality_for`).
+    pub(crate) fn member_ok(&self, item: &CatalogItem) -> bool {
+        member_quality_for(self.genre_spec, item)
+    }
+
     pub(crate) fn eligible(&self, keys: &[u32], taken: &HashSet<u32>, any_genre: bool) -> Vec<&CatalogItem> {
         let mut v: Vec<&CatalogItem> = keys
             .iter()
             .filter_map(|k| self.catalog.get(k))
-            .filter(|i| !taken.contains(&i.id) && (if any_genre { self.matches_filters_any_genre(i) } else { self.matches_filters(i) }) && passes_member_quality(i) && self.reliable(i))
+            .filter(|i| !taken.contains(&i.id) && (if any_genre { self.matches_filters_any_genre(i) } else { self.matches_filters(i) }) && self.member_ok(i) && self.reliable(i))
             .collect();
         crate::quality::sort_by_quality(&mut v);
         v
@@ -1452,7 +1463,7 @@ impl<'a> PageContext<'a> {
             None => Box::new(self.catalog.values()),
         };
         let mut pool: Vec<&CatalogItem> = candidates
-            .filter(|i| passes_member_quality(i) && self.reliable(i) && self.matches_filters(i) && self.skip.is_none_or(|s| !s.contains(&i.id)) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.is_none_or(|a| a == i.genres.iter().any(|g| g == "Animation")))
+            .filter(|i| self.member_ok(i) && self.reliable(i) && self.matches_filters(i) && self.skip.is_none_or(|s| !s.contains(&i.id)) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.is_none_or(|a| a == i.genres.iter().any(|g| g == "Animation")))
             .collect();
         // ties are broken by id so a page does not depend on the hash map order of the catalog (which changes at every reload)
         crate::quality::sort_by_quality(&mut pool);
@@ -1847,7 +1858,7 @@ impl<'a> PageContext<'a> {
             .into_iter()
             .filter_map(|(id, _)| {
                 let item = self.catalog.get(&id)?;
-                if item.media_type != other || exclude.contains(&id) || !self.matches_filters(item) || !passes_member_quality(item) || !self.reliable(item) {
+                if item.media_type != other || exclude.contains(&id) || !self.matches_filters(item) || !self.member_ok(item) || !self.reliable(item) {
                     return None;
                 }
                 let idx = self.vectors.index_of(id)?;
@@ -2085,20 +2096,6 @@ fn is_suggestive_title(title: &str) -> bool {
         || t.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "erotic" | "erotica" | "sexy" | "porn" | "nudity" | "nude" | "softcore" | "hentai" | "ecchi" | "harem" | "stripper"))
 }
 
-#[cfg(test)]
-mod suggestive_tests {
-    use super::is_suggestive_title;
-
-    #[test]
-    fn adult_content_names_are_found_and_genre_names_are_kept() {
-        assert!(is_suggestive_title("Adult Film Anthologies"));
-        assert!(is_suggestive_title("Erotic Thrillers"));
-        assert!(!is_suggestive_title("Young Adult Dramas"));
-        assert!(!is_suggestive_title("Adult Animation"));
-        assert!(!is_suggestive_title("Cozy Comfort Watches"));
-    }
-}
-
 /// A topic row title made only of genre and format words ("Comedies", "Documentary & Drama", "Thriller Picks"), which says nothing about how the titles feel.
 fn is_plain_genre_title(title: &str) -> bool {
     const WORDS: &[&str] = &[
@@ -2158,6 +2155,16 @@ pub fn passes_member_quality(item: &CatalogItem) -> bool {
     item.vote_average >= 6.0 && item.popularity >= 2.0 && item.has_overview() && item.has_poster() && (!safety_nets() || item.has_backdrop())
 }
 
+/// The quality gate of a page: a page whose members the Colab judge vetted (Stand-up, Cult, Independent ...) accepts less known titles (rating 5.5, popularity 0.5), since
+/// the niche is made of them; every other page uses `passes_member_quality`.
+pub fn member_quality_for(spec: Option<&crate::genre_spec::GenreSpec>, item: &CatalogItem) -> bool {
+    if spec.is_some_and(|s| s.is_judged()) {
+        item.vote_average >= 5.5 && item.popularity >= 0.5 && item.has_overview() && item.has_poster() && (!safety_nets() || item.has_backdrop())
+    } else {
+        passes_member_quality(item)
+    }
+}
+
 /// Second most common genre, if any.
 fn second_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>, first: &str) -> Option<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -2202,4 +2209,18 @@ fn majority_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>) -> String
         .max_by_key(|(_, c)| *c)
         .map(|(g, _)| g)
         .unwrap_or_else(|| "Drama".to_string())
+}
+
+#[cfg(test)]
+mod suggestive_tests {
+    use super::is_suggestive_title;
+
+    #[test]
+    fn adult_content_names_are_found_and_genre_names_are_kept() {
+        assert!(is_suggestive_title("Adult Film Anthologies"));
+        assert!(is_suggestive_title("Erotic Thrillers"));
+        assert!(!is_suggestive_title("Young Adult Dramas"));
+        assert!(!is_suggestive_title("Adult Animation"));
+        assert!(!is_suggestive_title("Cozy Comfort Watches"));
+    }
 }
