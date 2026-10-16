@@ -174,6 +174,7 @@ fn item_json(c: &Cand, rank: Option<usize>, today: i64) -> Value {
         "vote_average": c.vote_average, "tv_type": c.tv_type, "language": c.language,
         "rating": crate::catalog::cert_label(c.cert), "rating_gb": crate::catalog::gb_label(c.cert_gb), "rating_us": crate::catalog::us_label(c.cert_us),
         "rank": rank,
+        "badges": crate::contract::item_badges(rank, (!c.release_date.is_empty()).then_some(c.release_date.as_str()), today),
     })
 }
 
