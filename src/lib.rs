@@ -1,3 +1,4 @@
+pub mod attributes;
 pub mod catalog;
 pub mod fresh;
 pub mod genre_spec;

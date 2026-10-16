@@ -237,7 +237,7 @@ pub async fn feed(
     let fresh = state.fresh.load();
     let genre_spec = genre.map(|g| crate::genre_spec::resolve(g, surface));
     let cap = match (&genre_spec, language.as_deref()) {
-        (Some(spec), None) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity),
+        (Some(spec), None) => genre_row_cap_cached(&catalog, &state.profiles, surface, spec, maturity).max(crate::page::THIN_PAGE_FLOOR),
         (_, Some(lang)) => language_row_cap_cached(&catalog, &state.profiles, surface, lang, maturity),
         (None, None) => NETFLIX_ROWS_CAP,
     };
@@ -281,6 +281,8 @@ pub async fn feed(
         today:      crate::taxonomy::today_md(),
         session:    session_id.as_deref().unwrap_or(""),
         maturity,
+        fill_pool:  None,
+        skip:       None,
     };
 
     let all_rows = to_client_rows(ctx.build_page().await, &session_seen);

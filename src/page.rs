@@ -64,6 +64,8 @@ const MEMBER_POOL: usize = 120;
 
 /// Items per row (max)
 const ROW_SIZE: usize = 15;
+/// A genre page shows at least this many rows: when its own pool gives fewer, rows of neighbouring titles fill it up (`fill_thin_genre_page`)
+pub const THIN_PAGE_FLOOR: usize = 15;
 /// A genre page built from groups: the (level, id) of each cluster and the item indices kept
 type GroupMode = (Vec<(u8, i32)>, Vec<usize>);
 /// The titles of one group, by group id
@@ -259,6 +261,10 @@ pub struct PageContext<'a> {
     pub session:     &'a str,
     /// Maturity of the verified caller's profile; none for anonymous requests (see identity.rs)
     pub maturity:    Option<crate::identity::Maturity>,
+    /// Fill pass of a thin genre page: the pool is these titles (neighbours of what the page shows) instead of the whole catalog
+    pub fill_pool:   Option<&'a [u32]>,
+    /// Titles a fill pass must not use again (the ones the page already shows)
+    pub skip:        Option<&'a HashSet<u32>>,
 }
 
 /// The page's genre rule. The Pride page trusts the model's profile when the title has one: LGBTQ+ must be central to the story (measured
@@ -446,8 +452,11 @@ impl<'a> PageContext<'a> {
             let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
             let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
             let night = extra.len();
+            let mut taken_all = taken.clone(); vibes.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
+            let attrs: Vec<Row> = self.build_attribute_rows(&taken_all, 2).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
             rows = self.interleave(rows, extra, 1);
             rows = self.interleave(rows, vibes, 3 + night);
+            rows = self.interleave(rows, attrs, 5 + night);
         }
         rows
     }
@@ -523,7 +532,8 @@ impl<'a> PageContext<'a> {
             return self.build_kids_home();
         }
         if self.genre.is_some() || self.language.is_some() || kids_home {
-            return self.build_genre_page();
+            let rows = self.build_genre_page();
+            return self.fill_thin_genre_page(rows).await;
         }
         // The page built wholly from row definitions is off unless asked for (STREAMS_ENTRY_PAGES=1): measured 2026-10-13, its row names are vaguer and it fills
         // fewer rows than the topic rows; the vocabulary is used for seasonal rows (build_seasonal_rows).
@@ -1059,6 +1069,35 @@ impl<'a> PageContext<'a> {
         crate::row_label::name_fits(name, items) && !entry_names_other_kind(name, self.surface)
     }
 
+    /// Up to `want` rows defined by a catalog fact (runtime, format, source), chosen per session among the kinds that suit the page's surface; a title the page already shows is not used again.
+    fn build_attribute_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
+        use crate::attributes::SPECS;
+        let mut order: Vec<(f32, &crate::attributes::AttrSpec)> = SPECS
+            .iter()
+            .filter(|s| s.media == "both" || self.surface == "both" || s.media == self.surface)
+            .map(|s| (entry_noise(self.session, 7919 + s.id.bytes().map(|b| b as usize * 31).sum::<usize>()), s))
+            .collect();
+        order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut used: HashSet<u32> = taken.clone();
+        let mut rows: Vec<Row> = Vec::new();
+        for (_, spec) in order {
+            if rows.len() >= want { break; }
+            let Some(keys) = self.catalog.attr_keys.get(spec.id) else { continue };
+            let items = self.eligible(keys, &used, false);
+            if items.len() < 12 { continue; }
+            // quality order, shaken a little per session so the row is not the same twelve titles every time
+            let mut scored: Vec<(f32, &CatalogItem)> = items.into_iter().take(150).enumerate().map(|(rank, i)| (40.0 * entry_noise(self.session, i.id as usize) - rank as f32, i)).collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+            let list: Vec<&CatalogItem> = scored.into_iter().map(|s| s.1).collect();
+            let title = match self.surface { "movie" => spec.title_movie, "tv" => spec.title_tv, _ => spec.title_both };
+            if let Some(r) = self.row_of(title, "attribute", &list) {
+                r.items.iter().for_each(|i| { used.insert(i.id); });
+                rows.push(r);
+            }
+        }
+        rows
+    }
+
     /// Up to `want` rows of titles that reviewers describe alike (vibe groups), chosen per session, in the page's genre when it has one.
     fn build_vibe_rows(&self, taken: &HashSet<u32>, want: usize) -> Vec<Row> {
         if want == 0 || self.vibe.members.is_empty() { return Vec::new(); }
@@ -1260,6 +1299,46 @@ impl<'a> PageContext<'a> {
 
     // ── Genre pages ───────────────────────────────────────────────────────────
 
+    /// A genre page with fewer rows than the floor is topped up with rows of neighbouring titles: the titles closest to the mean of what the page shows (any genre, same age and
+    /// quality rules, nothing already shown), grouped into rows by the same builder and named by their own groups. Netflix fills thin genre pages the same way.
+    async fn fill_thin_genre_page(&self, mut rows: Vec<Row>) -> Vec<Row> {
+        let count = |rows: &[Row]| rows.iter().filter(|r| r.archetype != "trending").count();
+        if self.genre.is_none() || self.language.is_some() || self.animation.is_some() || count(&rows) == 0 || count(&rows) >= THIN_PAGE_FLOOR {
+            return rows;
+        }
+        let mut titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
+        // up to three passes, each looking further out around the mean of everything shown so far
+        for reach in [3000usize, 9000, 25000] {
+            let own = count(&rows);
+            if own >= THIN_PAGE_FLOOR { break; }
+            let mut mean = vec![0f32; DIMS];
+            let mut n = 0usize;
+            for it in rows.iter().flat_map(|r| &r.items) {
+                if let Some(ix) = self.vectors.index_of(it.id) {
+                    for (a, x) in mean.iter_mut().zip(self.vectors.row(ix)) { *a += x.to_f32(); }
+                    n += 1;
+                }
+            }
+            if n == 0 { break; }
+            l2_normalize(&mut mean);
+            let keys: Vec<u32> = {
+                let guard = self.hnsw.read().await;
+                self.retrieve_sync(&guard, &mean, reach).into_iter().map(|(k, _)| k).collect()
+            };
+            let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let ctx = PageContext { genre: None, genre_spec: None, target_rows: THIN_PAGE_FLOOR - own + 4, fill_pool: Some(&keys), skip: Some(&used), ..self.clone() };
+            let mut added = 0;
+            for r in ctx.build_genre_page_plain() {
+                if count(&rows) >= THIN_PAGE_FLOOR { break; }
+                if r.archetype == "trending" || !titles.insert(r.title.to_lowercase()) { continue; }
+                rows.push(Row { kind: "related".to_string(), ..r });
+                added += 1;
+            }
+            if added == 0 && reach >= 25000 { break; }
+        }
+        rows
+    }
+
     /// Genre pages: the Moods page and the event pages (Halloween, Pride) are made of their own rows, topped up with the regular genre rows when the event has fewer sub groups than the page has rows.
     fn build_genre_page(&self) -> Vec<Row> {
         if let Some(g) = self.genre {
@@ -1305,10 +1384,12 @@ impl<'a> PageContext<'a> {
 
         // a children's home holds titles made for children; a genre page chosen by a children's profile (Comedies, Adventure) keeps every title it may see
         let kids_home = self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids());
-        let mut pool: Vec<&CatalogItem> = self
-            .catalog
-            .values()
-            .filter(|i| passes_member_quality(i) && self.reliable(i) && self.matches_filters(i) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.is_none_or(|a| a == i.genres.iter().any(|g| g == "Animation")))
+        let candidates: Box<dyn Iterator<Item = &CatalogItem> + '_> = match self.fill_pool {
+            Some(keys) => Box::new(keys.iter().filter_map(|k| self.catalog.get(k))),
+            None => Box::new(self.catalog.values()),
+        };
+        let mut pool: Vec<&CatalogItem> = candidates
+            .filter(|i| passes_member_quality(i) && self.reliable(i) && self.matches_filters(i) && self.skip.is_none_or(|s| !s.contains(&i.id)) && (!kids_home || kid_interest(self.profiles, i)) && self.animation.is_none_or(|a| a == i.genres.iter().any(|g| g == "Animation")))
             .collect();
         // ties are broken by id so a page does not depend on the hash map order of the catalog (which changes at every reload)
         crate::quality::sort_by_quality(&mut pool);

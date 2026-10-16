@@ -137,6 +137,8 @@ impl CatalogItem {
 pub struct Catalog {
     items: HashMap<u32, CatalogItem>,
     pub chart_keys: Vec<u32>,
+    /// Per attribute row kind (`attributes::SPECS`) the quality titles that have the attribute, best quality first
+    pub attr_keys: HashMap<&'static str, Vec<u32>>,
 }
 
 impl Catalog {
@@ -144,7 +146,13 @@ impl Catalog {
         let mut chart: Vec<&CatalogItem> = items.values().filter(|i| crate::page::chart_ok(i)).collect();
         chart.sort_unstable_by(|a, b| b.popularity.total_cmp(&a.popularity).then_with(|| a.id.cmp(&b.id)));
         let chart_keys = chart.into_iter().map(|i| i.id).collect();
-        Self { items, chart_keys }
+        let mut attr_keys: HashMap<&'static str, Vec<u32>> = HashMap::new();
+        for spec in crate::attributes::SPECS {
+            let mut v: Vec<&CatalogItem> = items.values().filter(|i| crate::page::passes_member_quality(i) && (spec.test)(i)).collect();
+            crate::quality::sort_by_quality(&mut v);
+            attr_keys.insert(spec.id, v.into_iter().map(|i| i.id).collect());
+        }
+        Self { items, chart_keys, attr_keys }
     }
 }
 
