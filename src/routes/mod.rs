@@ -5,6 +5,7 @@ pub mod health;
 pub mod new_popular;
 pub mod rating;
 pub mod hero;
+pub mod marks;
 pub mod recommendations;
 pub mod search;
 pub mod suggestions;

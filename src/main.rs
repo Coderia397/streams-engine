@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/games",           get(routes::genres::games))
         .route("/api/language-support", get(routes::genres::language_support))
         .route("/api/new-popular",     get(routes::new_popular::new_popular))
+        .route("/api/skip-marks",      get(routes::marks::skip_marks))
         .route("/api/rating",          get(routes::rating::rating))
         .route("/api/ratings",         get(routes::rating::ratings))
         .route("/api/health",          get(routes::health::health))
