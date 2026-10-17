@@ -44,6 +44,40 @@ pub async fn skip_marks(State(state): State<Arc<AppState>>, Query(q): Query<Mark
     Json(pick(map.get(&key), q.episode, q.last == Some(1)))
 }
 
+/// Content reasons per title (note 69), from `content_reasons.jsonl` next to the database (made by pipeline/reasons_apply.py): a film `{"k","r"}`, a show `{"k","d","e"}` where `d` is the answer
+/// for every episode without its own summary and `e` holds the episodes whose answer differs (key `season:episode`).
+static REASONS: OnceLock<HashMap<String, Value>> = OnceLock::new();
+
+fn load_reasons(db_path: &str) -> HashMap<String, Value> {
+    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::new() };
+    let Ok(text) = std::fs::read_to_string(dir.join("content_reasons.jsonl")) else { return HashMap::new() };
+    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect()
+}
+
+/// The reasons of one video, or null when there is no answer for it (an unknown title, or an unreadable call): the page then shows the rating alone.
+pub fn pick_reasons(entry: Option<&Value>, season: Option<u32>, episode: Option<u32>) -> Value {
+    let Some(e) = entry else { return Value::Null };
+    if let Some(r) = e.get("r") { return r.clone(); }
+    let key = format!("{}:{}", season.unwrap_or(1), episode.unwrap_or(1));
+    e.get("e").and_then(|m| m.get(&key)).or_else(|| e.get("d")).cloned().unwrap_or(Value::Null)
+}
+
+#[derive(Deserialize)]
+pub struct ReasonsQuery {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: u32,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+}
+
+/// GET /api/content-reasons?type=tv&id=1396&season=1&episode=3: `{ "reasons": ["violence", "strong language"] | null }`, words from the fixed list of 20.
+pub async fn content_reasons(State(state): State<Arc<AppState>>, Query(q): Query<ReasonsQuery>) -> impl IntoResponse {
+    let map = REASONS.get_or_init(|| load_reasons(&state.config.db_path));
+    let key = format!("{}:{}", if q.kind == "tv" || q.kind == "series" { "tv" } else { "movie" }, q.id);
+    Json(json!({ "reasons": pick_reasons(map.get(&key), q.season, q.episode) }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +93,15 @@ mod tests {
         assert_eq!(pick(Some(&e), Some(5), false)["credits"], json!(0.97));
         // a finale without its own entry falls back to the typical one
         assert_eq!(pick(Some(&e), Some(9), true)["credits"], json!(0.97));
+    }
+
+    #[test]
+    fn reasons_default_override_and_film() {
+        let show = json!({ "k": "tv:1", "d": ["violence"], "e": { "1:3": ["sex", "nudity"] } });
+        assert_eq!(pick_reasons(Some(&show), Some(1), Some(3)), json!(["sex", "nudity"]));
+        assert_eq!(pick_reasons(Some(&show), Some(2), Some(1)), json!(["violence"]));
+        assert_eq!(pick_reasons(Some(&json!({ "k": "movie:1", "r": ["war"] })), None, None), json!(["war"]));
+        assert!(pick_reasons(None, Some(1), Some(1)).is_null());
     }
 
     #[test]
