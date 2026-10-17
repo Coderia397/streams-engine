@@ -13,6 +13,7 @@ pub mod hnsw;
 pub mod mmr;
 pub mod row_label;
 pub mod people;
+pub mod guard;
 pub mod page;
 pub mod hooks;
 pub mod personal;

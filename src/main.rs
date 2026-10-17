@@ -1,7 +1,6 @@
 use streams_engine::app::{build_app_state, Config};
 use streams_engine::{page, routes};
 use axum::{routing::{get, post}, Router};
-use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -40,7 +39,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/rating",          get(routes::rating::rating))
         .route("/api/ratings",         get(routes::rating::ratings))
         .route("/api/health",          get(routes::health::health))
-        .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn_with_state(state.clone(), streams_engine::guard::guard))
+        .layer(streams_engine::guard::cors())
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
