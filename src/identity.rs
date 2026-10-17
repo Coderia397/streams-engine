@@ -105,8 +105,8 @@ impl Maturity {
     /// May a profile with this maturity see this title?
     ///  * adult: everything (the page builders' own safety nets still apply)
     ///  * teens: no adult flagged and no suggestive titles
-    ///  * older kids: as teens, and the title must be kids, family or animation, with no blocked genre or keyword
-    ///  * little kids: as older kids, but animation alone is not enough (it must be kids or family)
+    ///  * older kids: a known rating up to PG, no blocked genre or keyword, and the title must be kids, family or animation (never unrated)
+    ///  * little kids: a known rating of U, as older kids, but animation alone is not enough (it must be kids or family)
     pub fn allows(self, item: &CatalogItem) -> bool {
         if self == Self::Adult {
             return true;
@@ -114,25 +114,30 @@ impl Maturity {
         if item.adult || item.flags & FLAG_SUGGESTIVE != 0 {
             return false;
         }
-        // a known age rating decides (U for little kids, up to PG for older kids, 12, up to 15)
+        if self.is_kids() {
+            // a title for a Kids profile needs a known rating within the tier AND to be made for children: a PG murder mystery or a rated sitcom is not (the rating alone
+            // never decides for Kids), and an unrated title is never shown
+            if item.cert == 0 || item.cert > self.max_cert() {
+                return false;
+            }
+            let has = |name: &str| item.genres.iter().any(|g| g.eq_ignore_ascii_case(name));
+            if KIDS_BLOCKED_GENRES.iter().any(|g| has(g)) {
+                return false;
+            }
+            if item.keywords.iter().any(|k| KIDS_BLOCKED_KEYWORDS.iter().any(|b| k.contains(b))) {
+                return false;
+            }
+            let kids_or_family = has("Kids") || has("Family");
+            return match self {
+                Self::LittleKids => kids_or_family,
+                _ => kids_or_family || has("Animation"),
+            };
+        }
+        // a known age rating decides (12 or 15 tiers); an unrated title is allowed there
         if item.cert != 0 {
             return item.cert <= self.max_cert();
         }
-        if matches!(self, Self::Twelve | Self::Fifteen) {
-            return true;
-        }
-        let has = |name: &str| item.genres.iter().any(|g| g.eq_ignore_ascii_case(name));
-        if KIDS_BLOCKED_GENRES.iter().any(|g| has(g)) {
-            return false;
-        }
-        if item.keywords.iter().any(|k| KIDS_BLOCKED_KEYWORDS.iter().any(|b| k.contains(b))) {
-            return false;
-        }
-        let kids_or_family = has("Kids") || has("Family");
-        match self {
-            Self::LittleKids => kids_or_family,
-            _ => kids_or_family || has("Animation"),
-        }
+        true
     }
 }
 
@@ -605,11 +610,22 @@ mod tests {
         it
     }
 
+    /// The same title with a known rating (U unless said otherwise).
+    fn with_cert(mut it: CatalogItem, cert: u8) -> CatalogItem {
+        it.cert = cert;
+        it
+    }
+
     #[test]
     fn a_known_age_rating_decides_what_each_tier_sees() {
-        // little kids see U only, older kids up to PG, teens up to 15, adults everything
-        assert!(Maturity::LittleKids.allows(&rated(1)) && !Maturity::LittleKids.allows(&rated(2)));
-        assert!(Maturity::OlderKids.allows(&rated(2)) && !Maturity::OlderKids.allows(&rated(3)));
+        // little kids see U only, older kids up to PG (and only titles made for children), teens up to 15, adults everything
+        let kids_title = |c| with_cert(item(&["Kids", "Family"], &[], false, 0), c);
+        assert!(Maturity::LittleKids.allows(&kids_title(1)) && !Maturity::LittleKids.allows(&kids_title(2)));
+        assert!(Maturity::OlderKids.allows(&kids_title(2)) && !Maturity::OlderKids.allows(&kids_title(3)));
+        // a PG drama or murder mystery is not for children whatever its rating says, and an unrated title is never shown to them
+        assert!(!Maturity::OlderKids.allows(&rated(2)));
+        assert!(!Maturity::OlderKids.allows(&with_cert(item(&["Mystery", "Drama", "Crime"], &[], false, 0), 2)));
+        assert!(!Maturity::OlderKids.allows(&with_cert(item(&["Family"], &[], false, 0), 0)));
         assert!(Maturity::Twelve.allows(&rated(3)) && !Maturity::Twelve.allows(&rated(4)));
         assert!(Maturity::Fifteen.allows(&rated(4)) && !Maturity::Fifteen.allows(&rated(5)));
         assert!(Maturity::Adult.allows(&rated(5)));
@@ -645,12 +661,12 @@ mod tests {
 
     #[test]
     fn maturity_policy() {
-        let kids_show = item(&["Kids", "Animation"], &[], false, 0);
-        let family_film = item(&["Family", "Comedy"], &["friendship"], false, 0);
-        let adult_cartoon = item(&["Animation", "Comedy"], &[], false, 0);
-        let horror = item(&["Horror", "Family"], &[], false, 0);
-        let violent_anime = item(&["Animation", "Action & Adventure"], &["gore", "war"], false, 0);
-        let drama = item(&["Drama"], &[], false, 0);
+        let kids_show = with_cert(item(&["Kids", "Animation"], &[], false, 0), 1);
+        let family_film = with_cert(item(&["Family", "Comedy"], &["friendship"], false, 0), 1);
+        let adult_cartoon = with_cert(item(&["Animation", "Comedy"], &[], false, 0), 2);
+        let horror = with_cert(item(&["Horror", "Family"], &[], false, 0), 1);
+        let violent_anime = with_cert(item(&["Animation", "Action & Adventure"], &["gore", "war"], false, 0), 2);
+        let drama = with_cert(item(&["Drama"], &[], false, 0), 2);
         let adult_flag = item(&["Drama"], &[], true, 0);
         let suggestive = item(&["Animation"], &[], false, FLAG_SUGGESTIVE);
 
