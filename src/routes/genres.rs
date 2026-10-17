@@ -88,6 +88,8 @@ pub async fn features(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut out = serde_json::Map::new();
     // the flags the page knows of, each off unless the file turns it on
     out.insert("games".to_string(), json!(flags.get("games").and_then(|v| v.as_bool()).unwrap_or(false)));
+    // everything but the visitor pages needs an account, unless the file turns that off for a while
+    out.insert("accounts_required".to_string(), json!(flags.get("accounts_required").and_then(|v| v.as_bool()).unwrap_or(true)));
     Json(serde_json::Value::Object(out))
 }
 
