@@ -320,7 +320,7 @@ impl<'a> PageContext<'a> {
 }
 
 /// The words of a row name that carry its meaning (lower case, without filler words and kind words such as "films").
-fn title_tokens(title: &str) -> HashSet<String> {
+pub(super) fn title_tokens(title: &str) -> HashSet<String> {
     const FILLER: [&str; 12] = ["and", "the", "of", "for", "a", "in", "hk", "films", "film", "movies", "shows", "series"];
     title
         .to_lowercase()
@@ -331,7 +331,7 @@ fn title_tokens(title: &str) -> HashSet<String> {
 }
 
 /// True when two row names say the same thing: the same words, or one is the other plus a single word (when it has two words or more), or they share three quarters of their words.
-fn titles_alike(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+pub(super) fn titles_alike(a: &HashSet<String>, b: &HashSet<String>) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }

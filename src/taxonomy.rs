@@ -23,6 +23,8 @@ pub struct TaxonomyEntry {
     pub lgbtq_central: bool,
     /// Calendar entries: the event they belong to (christmas, halloween, valentines ...), empty otherwise
     pub event: String,
+    /// What the row is about, in a sentence or two (the text that was embedded); empty for files without it
+    pub vibe_query: String,
     /// L2-normalised 1,024 dimension embedding of the `vibe_query` string
     pub embedding: Vec<f32>,
     /// `embedding` minus the corpus mean vector, renormalised. Cosine in this
@@ -115,6 +117,8 @@ struct TaxonomyMeta {
     lgbtq_central: bool,
     #[serde(default)]
     event: Option<String>,
+    #[serde(default)]
+    vibe_query: Option<String>,
 }
 
 /// In-memory store of all taxonomy embeddings.
@@ -170,6 +174,7 @@ impl TaxonomyStore {
                 keywords: meta.keywords.iter().map(|k| k.to_lowercase()).collect(),
                 lgbtq_central: meta.lgbtq_central,
                 event: meta.event.unwrap_or_default(),
+                vibe_query: meta.vibe_query.unwrap_or_default(),
                 centered: Vec::new(),
                 embedding,
             });
@@ -297,7 +302,7 @@ mod assign_tests {
     use super::*;
 
     fn entry(title: &str, v: Vec<f32>) -> TaxonomyEntry {
-        TaxonomyEntry { title: title.into(), media_type: "both".into(), kind: "theme".into(), season: None, keywords: vec![], lgbtq_central: false, event: String::new(), embedding: v, centered: vec![] }
+        TaxonomyEntry { title: title.into(), media_type: "both".into(), kind: "theme".into(), season: None, keywords: vec![], lgbtq_central: false, event: String::new(), vibe_query: String::new(), embedding: v, centered: vec![] }
     }
 
     /// With fewer usable entries than rows (a vocabulary that holds only the seasonal entries) the matching used to panic; rows left without an entry get no title.

@@ -4,6 +4,7 @@ mod charts;
 mod entry;
 mod events;
 mod genre;
+mod kids_collections;
 
 use crate::catalog::{CatalogItem, CatalogMap};
 use crate::centroid::CentroidVault;
@@ -474,6 +475,12 @@ impl<'a> PageContext<'a> {
                 let at = (if n == 0 { 2 } else { 5 + n }).min(rows.len());
                 rows.insert(at, row);
             }
+        }
+        // a children's page gets its banner collections (named ones and the ones in season), placed by slot like the adult banners
+        if kids && self.kids_entries && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
+            let used0: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
+            let banners = self.build_kids_collection_rows(&used0, 3).await;
+            rows.extend(banners);
         }
         // late night moods lead a night page, vibe rows (how the titles feel) are mixed in on every page that is not a children's or a language page
         if !kids && self.language.is_none() && self.animation.is_none() {

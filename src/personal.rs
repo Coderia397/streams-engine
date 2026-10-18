@@ -369,7 +369,7 @@ pub fn event_header(vibe: &crate::vibe::VibeIndex, catalog: &crate::catalog::Cat
     Some(json!({ "id": ev, "label_key": format!("event.{ev}"), "label": prettify(ev), "description": names.join(", "), "images": images, "hue": hue }))
 }
 
-fn collection_meta(id: &str, label_key: &str, label: &str, description: &str, target: serde_json::Value, row: &Row) -> serde_json::Value {
+pub(crate) fn collection_meta(id: &str, label_key: &str, label: &str, description: &str, target: serde_json::Value, row: &Row) -> serde_json::Value {
     let images: Vec<&str> = row.items.iter().filter_map(|i| i.backdrop_path.as_deref().or(i.poster_path.as_deref())).take(8).collect();
     // a colour of its own for each collection, the same on every visit
     let hue = id.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;

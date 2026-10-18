@@ -312,7 +312,12 @@ pub async fn feed(
         signals:    &signals,
     };
 
-    let (page_rows, collection_header) = match collection.and_then(|c| ctx.build_mood_collection(c)) {
+    let found = match collection {
+        Some(c) if c.starts_with("kids_") => ctx.build_kids_collection(c).await,
+        Some(c) => ctx.build_mood_collection(c),
+        None => None,
+    };
+    let (page_rows, collection_header) = match found {
         Some((rows, header)) => (rows, Some(header)),
         None => (ctx.build_page().await, None),
     };
