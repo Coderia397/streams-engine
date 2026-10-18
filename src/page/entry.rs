@@ -126,6 +126,9 @@ impl<'a> PageContext<'a> {
         let mut max_sim: Vec<f32> = vec![0.0; cands.len()];
         let mut alive: Vec<bool> = vec![true; cands.len()];
         let mut last_kind = String::new();
+        // two rows with the same name apart from filler words ("Hong Kong Action Classics", "Hong Kong HK Action Classics") do not share a page
+        let cand_tokens: Vec<HashSet<String>> = cands.iter().map(|c| title_tokens(&self.taxonomy.entries[c.idx].title)).collect();
+        let mut chosen_tokens: Vec<HashSet<String>> = Vec::new();
 
         while chosen.len() < want {
             let exploiting = chosen.len() < exploit_rows;
@@ -133,6 +136,9 @@ impl<'a> PageContext<'a> {
             let mut relaxed: Option<(usize, f32)> = None; // ignores the adjacency rule
             for (ci, c) in cands.iter().enumerate() {
                 if !alive[ci] || max_sim[ci] >= ENTRY_HARD_SIM {
+                    continue;
+                }
+                if chosen_tokens.iter().any(|t| titles_alike(t, &cand_tokens[ci])) {
                     continue;
                 }
                 let e = &self.taxonomy.entries[c.idx];
@@ -155,6 +161,7 @@ impl<'a> PageContext<'a> {
             let e = &self.taxonomy.entries[cands[ci].idx];
             *type_counts.entry(e.kind.clone()).or_insert(0) += 1;
             last_kind = e.kind.clone();
+            chosen_tokens.push(cand_tokens[ci].clone());
             for (cj, other) in cands.iter().enumerate() {
                 if alive[cj] {
                     let s = cosine_sim(&e.centered, &self.taxonomy.entries[other.idx].centered);
@@ -309,5 +316,43 @@ impl<'a> PageContext<'a> {
             if let Some(r) = self.row_of(&name, "vibe", &fresh) { r.items.iter().for_each(|i| { used.insert(i.id); }); rows.push(r); }
         }
         rows
+    }
+}
+
+/// The words of a row name that carry its meaning (lower case, without filler words and kind words such as "films").
+fn title_tokens(title: &str) -> HashSet<String> {
+    const FILLER: [&str; 12] = ["and", "the", "of", "for", "a", "in", "hk", "films", "film", "movies", "shows", "series"];
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !FILLER.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// True when two row names say the same thing: the same words, or one is the other plus a single word (when it has two words or more), or they share three quarters of their words.
+fn titles_alike(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let common = a.intersection(b).count();
+    let (small, large) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
+    if common == small && (large == small || (small >= 2 && large - small <= 1)) {
+        return true;
+    }
+    common as f32 / (a.len() + b.len() - common) as f32 >= 0.75
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn same_name_apart_from_filler_is_alike() {
+        let t = title_tokens;
+        assert!(titles_alike(&t("Hong Kong HK Action Classics"), &t("Hong Kong Action Classics")));
+        assert!(titles_alike(&t("Action"), &t("Action Films")));
+        assert!(!titles_alike(&t("Action & Comedy"), &t("Action")));
+        assert!(!titles_alike(&t("Korean Crime Drama"), &t("Korean Fantasy Dramas")));
     }
 }

@@ -56,10 +56,17 @@ impl<'a> PageContext<'a> {
         for (k, r) in charts.into_iter().enumerate() {
             slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], r));
         }
-        // The slots are places to aim at, not places to be at: a session moves each kind of row a little (later by 0 to 3 places, the same for the whole session), so the page is
-        // not the same list in the same order for everyone; the first rows (continue watching, your list) stay where they are.
+        // The slots are places to aim at, not places to be at: each kind of row has a window and a session puts it somewhere in that window (the same for the whole session, different
+        // between sessions), so the page is not the same list in the same order for everyone. Continue watching and your list stay first.
         let jitter = |slot: usize, archetype: &str| -> usize {
-            if matches!(archetype, "continue" | "list" | "top_picks") { 0 } else { ((entry_noise(self.session, 7_000 + slot * 13) * 4.0) as usize).min(3) }
+            let width = match archetype {
+                "continue" | "list" => 0,
+                "top_picks" => 2,
+                "trending" | "new" => 6,
+                "collection" => 9,
+                _ => 8,
+            };
+            if width == 0 { 0 } else { ((entry_noise(self.session, 7_000 + slot * 13) * width as f32) as usize).min(width - 1) }
         };
         let slotted: Vec<(usize, Row)> = slotted.into_iter().map(|(slot, r)| (slot + jitter(slot, &r.archetype), r)).collect();
         let mut slotted = slotted;
