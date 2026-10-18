@@ -25,6 +25,8 @@ pub struct AppState {
     pub vibe:       Arc<crate::vibe::VibeIndex>,
     pub vault:      Arc<CentroidVault>,
     pub taxonomy:   Arc<TaxonomyStore>,
+    /// The row vocabulary of the Kids pages (`taxonomy_kids.bin` and `.json` next to the main one); empty when the files are not there
+    pub taxonomy_kids: Arc<TaxonomyStore>,
     /// Model written title profiles and their vectors (empty when the files are missing)
     pub profiles:   Arc<crate::profiles::ProfileStore>,
     /// Names of the topic rows (`topics_meta.json`), empty when the file is missing
@@ -73,17 +75,21 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let stamp = vectors_stamp(&config.vectors_path);
 
     // Stage 1: independent loads. The catalog is the SQLite table in an ArcSwap, the vectors map the f16 file; the rest read small files and tables.
-    let (catalog, vectors, taxonomy, profiles, people, groups_map, group_names, fresh_store, index) = std::thread::scope(|s| {
+    let (catalog, vectors, taxonomy, taxonomy_kids, profiles, people, groups_map, group_names, fresh_store, index) = std::thread::scope(|s| {
         let h_catalog = s.spawn(|| make_shared_catalog(db));
         let h_vectors = s.spawn(|| VectorStore::load(&config.vectors_path));
         let h_taxonomy = s.spawn(|| TaxonomyStore::load(&config.taxonomy_bin_path, &config.taxonomy_json_path));
+        let h_taxonomy_kids = s.spawn(|| {
+            let dir = std::path::Path::new(&config.taxonomy_bin_path).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            TaxonomyStore::load(&dir.join("taxonomy_kids.bin").to_string_lossy(), &dir.join("taxonomy_kids.json").to_string_lossy())
+        });
         let h_profiles = s.spawn(|| crate::profiles::ProfileStore::load(&profile_dir));
         let h_people = s.spawn(|| crate::people::PeopleIndex::load(db));
         let h_groups = s.spawn(|| crate::groups::load(db));
         let h_names = s.spawn(|| crate::groups::load_names(db));
         let h_fresh = s.spawn(|| crate::fresh::FreshStore::load(&profile_dir));
         let h_index = s.spawn(|| open_index_file(config, &stamp));
-        (joined(h_catalog.join()), joined(h_vectors.join()), joined(h_taxonomy.join()), joined(h_profiles.join()), joined(h_people.join()), joined(h_groups.join()), joined(h_names.join()), joined(h_fresh.join()), joined(h_index.join()))
+        (joined(h_catalog.join()), joined(h_vectors.join()), joined(h_taxonomy.join()), joined(h_taxonomy_kids.join()), joined(h_profiles.join()), joined(h_people.join()), joined(h_groups.join()), joined(h_names.join()), joined(h_fresh.join()), joined(h_index.join()))
     });
     let catalog = catalog?;
     let vectors = vectors?;
@@ -93,6 +99,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         TaxonomyStore::from_raw(vec![])
     });
 
+    let mut taxonomy_kids = taxonomy_kids.unwrap_or_else(|_| TaxonomyStore::from_raw(vec![]));
     // Stage 2: what needs the catalog or the vectors. The corpus mean centres the taxonomy vectors (on the title profile mean when those vectors exist, a different text with a different mean).
     let catalog_now = catalog.load();
     let (mean, seeds, vault) = std::thread::scope(|s| {
@@ -114,6 +121,10 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     if let Some(t) = Arc::get_mut(&mut taxonomy) {
         t.center_with(&mean);
     }
+    if let Some(t) = Arc::get_mut(&mut taxonomy_kids) {
+        t.center_with(&mean);
+    }
+    tracing::info!("Kids row vocabulary: {} entries", taxonomy_kids.entries.len());
 
     // HNSW index: loaded from disk, or built in the background (brute force serves until it is ready)
     let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
@@ -160,6 +171,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         vibe: Arc::new(crate::vibe::load(&config.db_path, crate::groups::vibe_members(&groups_map))),
         vault,
         taxonomy,
+        taxonomy_kids,
         profiles,
         topics,
         fresh,

@@ -56,6 +56,13 @@ impl<'a> PageContext<'a> {
         for (k, r) in charts.into_iter().enumerate() {
             slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], r));
         }
+        // The slots are places to aim at, not places to be at: a session moves each kind of row a little (later by 0 to 3 places, the same for the whole session), so the page is
+        // not the same list in the same order for everyone; the first rows (continue watching, your list) stay where they are.
+        let jitter = |slot: usize, archetype: &str| -> usize {
+            if matches!(archetype, "continue" | "list" | "top_picks") { 0 } else { ((entry_noise(self.session, 7_000 + slot * 13) * 4.0) as usize).min(3) }
+        };
+        let slotted: Vec<(usize, Row)> = slotted.into_iter().map(|(slot, r)| (slot + jitter(slot, &r.archetype), r)).collect();
+        let mut slotted = slotted;
         // equal slots (more rows than slots of a kind) go one after the other
         slotted.sort_by_key(|(slot, _)| *slot);
         let mut next_free = 0usize;
@@ -116,9 +123,12 @@ impl<'a> PageContext<'a> {
             return None;
         }
 
-        let title = match (only, self.surface, nets) {
-            (Some("tv"), _, _) | (None, "tv", _) => "Top 10 Series Today",
-            (Some("movie"), _, _) | (None, "movie", true) => "Top 10 Movies Today",
+        let title = match (only, self.surface, nets, kids_chart) {
+            (Some("tv"), _, _, true) | (None, "tv", _, true) => "Top 10 Kids' Series Today",
+            (Some("movie"), _, _, true) | (None, "movie", true, true) => "Top 10 Kids' Films Today",
+            (_, _, _, true) => "Top 10 for Kids Today",
+            (Some("tv"), _, _, _) | (None, "tv", _, _) => "Top 10 Series Today",
+            (Some("movie"), _, _, _) | (None, "movie", true, _) => "Top 10 Movies Today",
             _ => "Top 10 Today",
         };
 

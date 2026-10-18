@@ -205,6 +205,7 @@ pub async fn hero_feed(
         late_night: q.hour.is_some_and(|h| h >= 22 || h <= 4),
         session: &session,
         slot: hook_slot(),
+        kids: maturity.is_some_and(|m| m.is_kids()),
     };
     let items: Vec<Value> = chosen
         .iter()

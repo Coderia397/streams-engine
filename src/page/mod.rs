@@ -270,6 +270,8 @@ pub struct PageContext<'a> {
     pub language:    Option<&'a str>,
     /// Children's home only: build the page from the animated titles (`Some(true)`) or from the live action ones (`Some(false)`)
     pub animation:   Option<bool>,
+    /// The Kids home is built from the Kids row vocabulary (`taxonomy` is then that vocabulary): rows chosen by value and variety, none at a fixed place
+    pub kids_entries: bool,
     pub surface:     &'a str,   // "movie" | "tv" | "both"
     /// Optional genre as sent by the client (kept for row titles).
     pub genre:       Option<&'a str>,
@@ -529,6 +531,12 @@ impl<'a> PageContext<'a> {
         // seeds, which are mostly adult topics with a few allowed titles left in each.
         let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles();
         if kids_home && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
+            if self.kids_entries {
+                let rows = self.build_entry_page().await;
+                if rows.len() > 4 {
+                    return rows;
+                }
+            }
             return self.build_kids_home();
         }
         if self.genre.is_some() || self.language.is_some() || kids_home {

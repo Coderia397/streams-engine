@@ -277,6 +277,8 @@ pub async fn feed(
         state.vault.blend_taste(&taste_affinities)
     };
 
+    // A Kids profile's home comes from the Kids row vocabulary when there is one
+    let kids_entries = maturity.is_some_and(|m| m.is_kids()) && genre.is_none() && language.is_none() && state.taxonomy_kids.entries.len() >= 60;
     // Assemble page
     let ctx = PageContext {
         catalog:    &catalog,
@@ -288,13 +290,14 @@ pub async fn feed(
         vibe:       &state.vibe,
         late_night,
         vault:      &state.vault,
-        taxonomy:   &state.taxonomy,
+        taxonomy:   if kids_entries { &state.taxonomy_kids } else { &state.taxonomy },
         profiles:   &state.profiles,
         topics:     &state.topics,
         fresh:      &fresh,
         today_ymd:  crate::fresh::ymd(crate::fresh::today_days()),
         language:   language.as_deref(),
         animation:  None,
+        kids_entries,
         surface,
         genre,
         genre_spec: genre_spec.as_ref(),
