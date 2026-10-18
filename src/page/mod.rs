@@ -530,14 +530,17 @@ impl<'a> PageContext<'a> {
         // A children's profile gets a page built from the titles it may see (clustered like a genre page) instead of the global topic
         // seeds, which are mostly adult topics with a few allowed titles left in each.
         let kids_home = self.maturity.is_some_and(|m| m.is_kids()) && self.profiles.has_profiles();
-        if kids_home && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
+        if kids_home && self.language.is_none() && self.animation.is_none() {
             if self.kids_entries {
+                // a genre page keeps the rows that still have enough titles of the genre; a page that stays thin falls back to the clustered genre page
                 let rows = self.build_entry_page().await;
-                if rows.len() > 4 {
+                if rows.len() > if self.genre.is_none() { 4 } else { 8 } {
                     return rows;
                 }
             }
-            return self.build_kids_home();
+            if self.genre.is_none() {
+                return self.build_kids_home();
+            }
         }
         if self.genre.is_some() || self.language.is_some() || kids_home {
             let rows = self.build_genre_page();

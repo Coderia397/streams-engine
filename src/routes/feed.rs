@@ -277,8 +277,8 @@ pub async fn feed(
         state.vault.blend_taste(&taste_affinities)
     };
 
-    // A Kids profile's home comes from the Kids row vocabulary when there is one
-    let kids_entries = maturity.is_some_and(|m| m.is_kids()) && genre.is_none() && language.is_none() && state.taxonomy_kids.entries.len() >= 60;
+    // A Kids profile's home, Films, Series and genre pages come from the Kids row vocabulary when there is one
+    let kids_entries = maturity.is_some_and(|m| m.is_kids()) && language.is_none() && state.taxonomy_kids.entries.len() >= 60;
     // Assemble page
     let ctx = PageContext {
         catalog:    &catalog,
