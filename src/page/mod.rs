@@ -979,6 +979,8 @@ fn kind_weight(kind: &str) -> f32 {
         "combo" => 0.7,
         "country" => 0.5,
         "setting" => 0.4,
+        "animal" | "job" | "hobby" | "place" | "learning" => 0.6,
+        "variant" => 0.5,
         "decade" | "character" | "audience" => 0.35,
         "animation" | "style" | "editorial" => 0.3,
         "identity" => 0.2,
