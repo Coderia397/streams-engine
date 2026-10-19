@@ -175,7 +175,9 @@ impl<'a> PageContext<'a> {
             }
             let fresh: Vec<u32> = cands[ci].hits.iter().copied().filter(|id| !used.contains(id)).collect();
             // Reserve ids now so later rows cannot claim them
-            fresh.iter().take(ROW_SIZE * 2).for_each(|id| { used.insert(*id); });
+            // a genre page has a small pool, so a row holds back only its first titles from the rows after it (Netflix repeats a title across rows); the other pages keep every title in one row
+            let reserve = if on_genre { ROW_SIZE / 2 } else { ROW_SIZE * 2 };
+            fresh.iter().take(reserve).for_each(|id| { used.insert(*id); });
             chosen.push((cands[ci].idx, fresh));
         }
         let t_select = t0.elapsed();
