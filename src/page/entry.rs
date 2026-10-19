@@ -69,7 +69,10 @@ impl<'a> PageContext<'a> {
         let want = self.target_rows;
         let exploit_rows = if has_taste { ((want as f32) * EXPLOIT_SHARE).ceil() as usize } else { 0 };
         // Shortlist both rankings so each phase has enough to satisfy the page rules
-        let per_list = (want * 4).clamp(60, 200);
+        // a genre page keeps only the neighbours that are of the genre (and allowed), which are few among a row's nearest titles overall: every eligible row is looked at, and deeper
+        let on_genre = self.genre.is_some();
+        let per_list = if on_genre { n_eligible.clamp(60, 400) } else { (want * 4).clamp(60, 200) };
+        let ann_k = if on_genre { ANN_GENRE_K } else { ANN_ENTRY_K };
         let mut pick_idx: Vec<usize> = Vec::new();
         if has_taste {
             scored.sort_unstable_by(|a, b| b.exploit.partial_cmp(&a.exploit).unwrap_or(std::cmp::Ordering::Equal));
@@ -89,7 +92,7 @@ impl<'a> PageContext<'a> {
             .par_iter()
             .filter_map(|&idx| {
                 let e = &self.taxonomy.entries[idx];
-                let hits = self.retrieve_sync(&guard, &e.embedding, ANN_ENTRY_K);
+                let hits = self.retrieve_sync(&guard, &e.embedding, ann_k);
                 let good: Vec<(&CatalogItem, f32)> = hits
                     .iter()
                     .filter_map(|(id, sim)| self.catalog.get(id).map(|i| (i, *sim)))

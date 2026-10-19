@@ -102,6 +102,8 @@ const ANN_K: usize = 200;
 
 /// Deeper retrieval for entry rows: only about 5% of the catalog passes the quality gate
 const ANN_ENTRY_K: usize = 500;
+/// Depth of a row's search on a genre page.
+const ANN_GENRE_K: usize = 2500;
 
 /// Taxonomy cosine threshold to accept Hungarian assignment (else fallback title)
 const TAXONOMY_THRESHOLD: f32 = 0.55;
