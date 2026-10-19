@@ -73,7 +73,8 @@ pub fn genre_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::pro
         })
         .count();
     // a judged niche page is small by nature: its titles may repeat across two visits
-    let per_row = if spec.is_judged() { ROW_TITLES } else { ROW_TITLES * SESSION_TURNOVER };
+    // a children's page has a small pool and its rows may share titles (as on Netflix), so each row needs half as many
+    let per_row = if spec.is_judged() || maturity.is_some_and(|m| m.is_kids()) { ROW_TITLES } else { ROW_TITLES * SESSION_TURNOVER };
     (pool / per_row).min(NETFLIX_ROWS_CAP)
 }
 
