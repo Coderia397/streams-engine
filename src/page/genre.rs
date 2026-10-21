@@ -1,5 +1,77 @@
 use super::*;
 
+
+/// The titles of a genre page: the pool is cut to this many best titles before clustering.
+const POOL: usize = 3000;
+/// A cluster needs this many titles to become a row.
+const MIN_CLUSTER: usize = 8;
+
+/// A pool split into clusters: the titles kept (with vectors), each cluster's centre, the cluster and closeness of every title, the number of clusters, and the (level, id) of the
+/// database group each cluster is when the clusters are groups (empty when they come from k means).
+struct Clusters<'p> {
+    items: Vec<(&'p CatalogItem, Vec<f32>)>,
+    centers: Vec<Vec<f32>>,
+    assign: Vec<(usize, f32)>,
+    k: usize,
+    groups: Vec<(u8, i32)>,
+}
+
+/// K means over the vectors: farthest first initialisation, then six Lloyd rounds. Returns the centres and the (cluster, cosine to its centre) of every title.
+fn kmeans(items: &[(&CatalogItem, Vec<f32>)], k: usize) -> (Vec<Vec<f32>>, Vec<(usize, f32)>) {
+    // Farthest first initialisation
+    let mut centers: Vec<Vec<f32>> = vec![items[0].1.clone()];
+    let mut best_sim: Vec<f32> = items.iter().map(|(_, v)| cosine_sim(v, &centers[0])).collect();
+    while centers.len() < k {
+        let far = best_sim
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let c = items[far].1.clone();
+        for (i, (_, v)) in items.iter().enumerate() {
+            let s = cosine_sim(v, &c);
+            if s > best_sim[i] {
+                best_sim[i] = s;
+            }
+        }
+        centers.push(c);
+    }
+
+    let assign_all = |centers: &[Vec<f32>]| -> Vec<(usize, f32)> {
+        items
+            .par_iter()
+            .map(|(_, v)| {
+                centers
+                    .iter()
+                    .enumerate()
+                    .map(|(c, cv)| (c, cosine_sim(v, cv)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or((0, 0.0))
+            })
+            .collect()
+    };
+
+    let mut assign = assign_all(&centers);
+    for _ in 0..6 {
+        let mut sums = vec![vec![0.0f32; DIMS]; k];
+        for (i, &(c, _)) in assign.iter().enumerate() {
+            for (a, x) in sums[c].iter_mut().zip(items[i].1.iter()) {
+                *a += x;
+            }
+        }
+        for (c, sum) in sums.into_iter().enumerate() {
+            let mut sum = sum;
+            if sum.iter().any(|x| x.abs() > 1e-9) {
+                l2_normalize(&mut sum);
+                centers[c] = sum;
+            }
+        }
+        assign = assign_all(&centers);
+    }
+    (centers, assign)
+}
+
 impl<'a> PageContext<'a> {
     /// A genre page with fewer rows than the floor is topped up with rows of neighbouring titles: the titles closest to the mean of what the page shows (any genre, same age and
     /// quality rules, nothing already shown), grouped into rows by the same builder and named by their own groups. Netflix fills thin genre pages the same way.
@@ -77,14 +149,25 @@ impl<'a> PageContext<'a> {
     /// single genre, so cluster the genre's own best titles on the fly instead
     /// (farthest first init, a few Lloyd rounds) to get sub-topics inside the genre.
     pub(super) fn build_genre_page_plain(&self) -> Vec<Row> {
-        const POOL: usize = 3000;
-        const MIN_CLUSTER: usize = 8;
-
         let mut rows: Vec<Row> = Vec::new();
         if let Some(r) = self.build_trending_row() {
             rows.push(r);
         }
+        let items = self.genre_pool();
+        if items.len() < COHERENCE_MIN_ITEMS {
+            return rows;
+        }
+        let clusters = self.cluster_pool(items);
+        let order = self.cluster_order(&clusters);
+        let first_thematic = rows.len();
+        let mut state = PageState::new();
+        let placed = self.place_cluster_rows(&clusters, order, &mut rows, &mut state);
+        self.name_cluster_rows(&clusters, &placed, first_thematic, &mut rows, &mut state);
+        rows
+    }
 
+    /// The titles a genre page is made of: the best of the catalog (or of the fill pool) that this page may show, with their vectors.
+    fn genre_pool(&self) -> Vec<(&CatalogItem, Vec<f32>)> {
         // a children's home holds titles made for children; a genre page chosen by a children's profile (Comedies, Adventure) keeps every title it may see
         let kids_home = self.genre.is_none() && self.language.is_none() && self.maturity.is_some_and(|m| m.is_kids());
         let candidates: Box<dyn Iterator<Item = &CatalogItem> + '_> = match self.fill_pool {
@@ -110,9 +193,7 @@ impl<'a> PageContext<'a> {
             });
         }
         pool.truncate(POOL);
-
-        let items: Vec<(&CatalogItem, Vec<f32>)> = pool
-            .into_iter()
+        pool.into_iter()
             .filter_map(|i| {
                 let idx = self.vectors.index_of(i.id)?;
                 if self.vectors.is_zero_row(idx) {
@@ -120,44 +201,17 @@ impl<'a> PageContext<'a> {
                 }
                 Some((i, self.vectors.get_f32(idx)))
             })
-            .collect();
-        if items.len() < COHERENCE_MIN_ITEMS {
-            return rows;
-        }
+            .collect()
+    }
 
-        // Rows from the groups of the database. Every title of the page's pool belongs to a group at each level of the hierarchy (world level 2 down to level 1, themes in between);
-        // the finest level that gives enough groups of MIN_CLUSTER titles or more is used, each such group is a row. A pool too small for any level to give four rows is clustered by
-        // vectors instead, and its rows are then named after the group most of their titles share.
-        let items_all = items;
+    /// Splits the pool into the clusters that become rows: the groups of the database when they give enough rows, else k means over the vectors.
+    ///
+    /// Every title of the page's pool belongs to a group at each level of the hierarchy (world level 2 down to level 1, themes in between); the finest level that gives enough groups
+    /// of MIN_CLUSTER titles or more is used, each such group is a row. A pool too small for any level to give four rows is clustered by vectors instead, and its rows are then named
+    /// after the group most of their titles share.
+    fn cluster_pool<'p>(&self, items_all: Vec<(&'p CatalogItem, Vec<f32>)>) -> Clusters<'p> {
         let want_rows = self.target_rows.min(items_all.len() / 20).max(6);
-        let mut group_mode: Option<GroupMode> = None; // (level, id) per cluster, and the item indices kept
-        if !self.groups.is_empty() {
-            let mut best: Option<(u8, Vec<GroupItems>)> = None;
-            for level in 0..crate::groups::N_LEVELS {
-                let mut by: HashMap<i32, Vec<usize>> = HashMap::default();
-                for (i, (it, _)) in items_all.iter().enumerate() {
-                    if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { by.entry(id).or_default().push(i); } }
-                }
-                let mut kept: Vec<(i32, Vec<usize>)> = by.into_iter().filter(|(_, ix)| ix.len() >= MIN_CLUSTER).collect();
-                kept.sort_by(|x, y| y.1.len().cmp(&x.1.len()).then(x.0.cmp(&y.0)));
-                let enough = kept.len() >= want_rows;
-                if best.as_ref().is_none_or(|(_, b)| kept.len() > b.len()) || enough { best = Some((level, kept)); }
-                if enough { break; }
-            }
-            if let Some((level, kept)) = best {
-                if kept.len() >= 4 {
-                    let ids: Vec<(u8, i32)> = kept.iter().map(|(g, _)| (level, *g)).collect();
-                    let idx: Vec<usize> = kept.into_iter().flat_map(|(_, ix)| ix).collect();
-                    group_mode = Some((ids, idx));
-                }
-            }
-        }
-        let cluster_group: Vec<(u8, i32)>;
-        let items: Vec<(&CatalogItem, Vec<f32>)>;
-        let centers: Vec<Vec<f32>>;
-        let assign: Vec<(usize, f32)>;
-        let k: usize;
-        if let Some((ids, idx)) = group_mode {
+        if let Some((ids, idx)) = self.group_clusters(&items_all, want_rows) {
             // items of the kept groups, in group order; a group's centre is the mean of its members
             let mut sel: Vec<(&CatalogItem, Vec<f32>)> = Vec::with_capacity(idx.len());
             let mut cid: Vec<usize> = Vec::with_capacity(idx.len());
@@ -172,73 +226,44 @@ impl<'a> PageContext<'a> {
             let mut cs: Vec<Vec<f32>> = vec![vec![0.0f32; DIMS]; ids.len()];
             for (n, (_, v)) in sel.iter().enumerate() { for (a, x) in cs[cid[n]].iter_mut().zip(v) { *a += x; } }
             for c in cs.iter_mut() { l2_normalize(c); }
-            assign = sel.iter().enumerate().map(|(n, (_, v))| (cid[n], cosine_sim(v, &cs[cid[n]]))).collect();
-            k = ids.len(); centers = cs; cluster_group = ids; items = sel;
-        } else {
-            let items_k = items_all;
-            let k_means = self.target_rows.min(items_k.len() / MIN_CLUSTER).max(1);
-            let (c_, a_) = {
-                let items = &items_k;
-                let k = k_means;
-
-            // Farthest first initialisation
-            let mut centers: Vec<Vec<f32>> = vec![items[0].1.clone()];
-            let mut best_sim: Vec<f32> = items.iter().map(|(_, v)| cosine_sim(v, &centers[0])).collect();
-            while centers.len() < k {
-                let far = best_sim
-                    .iter()
-                    .enumerate()
-                    .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                let c = items[far].1.clone();
-                for (i, (_, v)) in items.iter().enumerate() {
-                    let s = cosine_sim(v, &c);
-                    if s > best_sim[i] {
-                        best_sim[i] = s;
-                    }
-                }
-                centers.push(c);
-            }
-
-            let assign_all = |centers: &[Vec<f32>]| -> Vec<(usize, f32)> {
-                items
-                    .par_iter()
-                    .map(|(_, v)| {
-                        centers
-                            .iter()
-                            .enumerate()
-                            .map(|(c, cv)| (c, cosine_sim(v, cv)))
-                            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                            .unwrap_or((0, 0.0))
-                    })
-                    .collect()
-            };
-
-            let mut assign = assign_all(&centers);
-            for _ in 0..6 {
-                let mut sums = vec![vec![0.0f32; DIMS]; k];
-                for (i, &(c, _)) in assign.iter().enumerate() {
-                    for (a, x) in sums[c].iter_mut().zip(items[i].1.iter()) {
-                        *a += x;
-                    }
-                }
-                for (c, sum) in sums.into_iter().enumerate() {
-                    let mut sum = sum;
-                    if sum.iter().any(|x| x.abs() > 1e-9) {
-                        l2_normalize(&mut sum);
-                        centers[c] = sum;
-                    }
-                }
-                assign = assign_all(&centers);
-            }
-
-                (centers, assign)
-            };
-            k = k_means; centers = c_; assign = a_; cluster_group = Vec::new(); items = items_k;
+            let assign = sel.iter().enumerate().map(|(n, (_, v))| (cid[n], cosine_sim(v, &cs[cid[n]]))).collect();
+            return Clusters { items: sel, centers: cs, assign, k: ids.len(), groups: ids };
         }
+        let k = self.target_rows.min(items_all.len() / MIN_CLUSTER).max(1);
+        let (centers, assign) = kmeans(&items_all, k);
+        Clusters { items: items_all, centers, assign, k, groups: Vec::new() }
+    }
 
-        // Order clusters: taste alignment when there is a taste vector, else size
+    /// The groups of the database that can be rows of this pool: (level, id) of each group and the indices of the titles kept, None when no level gives four groups.
+    fn group_clusters(&self, items_all: &[(&CatalogItem, Vec<f32>)], want_rows: usize) -> Option<GroupMode> {
+        if self.groups.is_empty() {
+            return None;
+        }
+        let mut best: Option<(u8, Vec<GroupItems>)> = None;
+        for level in 0..crate::groups::N_LEVELS {
+            let mut by: HashMap<i32, Vec<usize>> = HashMap::default();
+            for (i, (it, _)) in items_all.iter().enumerate() {
+                if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { by.entry(id).or_default().push(i); } }
+            }
+            let mut kept: Vec<(i32, Vec<usize>)> = by.into_iter().filter(|(_, ix)| ix.len() >= MIN_CLUSTER).collect();
+            kept.sort_by(|x, y| y.1.len().cmp(&x.1.len()).then(x.0.cmp(&y.0)));
+            let enough = kept.len() >= want_rows;
+            if best.as_ref().is_none_or(|(_, b)| kept.len() > b.len()) || enough { best = Some((level, kept)); }
+            if enough { break; }
+        }
+        let (level, kept) = best?;
+        if kept.len() < 4 {
+            return None;
+        }
+        let ids: Vec<(u8, i32)> = kept.iter().map(|(g, _)| (level, *g)).collect();
+        let idx: Vec<usize> = kept.into_iter().flat_map(|(_, ix)| ix).collect();
+        Some((ids, idx))
+    }
+
+    /// The order the clusters become rows: by alignment with the taste vector when there is one, else by size with a session jitter; on a page that is not about anime,
+    /// at most two anime clusters sit among the first rows.
+    fn cluster_order(&self, cl: &Clusters) -> Vec<(usize, f32)> {
+        let (items, assign, centers, k) = (&cl.items, &cl.assign, &cl.centers, cl.k);
         let has_taste = self.taste.iter().any(|&x| x.abs() > 1e-6);
         let anime_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Anime));
         let mut anime_count = vec![0usize; k];
@@ -286,9 +311,13 @@ impl<'a> PageContext<'a> {
             early.extend(late);
             order = early;
         }
+        order
+    }
 
-        let first_thematic = rows.len();
-        let mut state = PageState::new();
+    /// One row per cluster in `order` that has enough titles: the best 40 by closeness to the centre, diversified, with the other type of title mixed in where the page shows both.
+    /// Returns the clusters that became rows, in row order.
+    fn place_cluster_rows(&self, cl: &Clusters, order: Vec<(usize, f32)>, rows: &mut Vec<Row>, state: &mut PageState) -> Vec<usize> {
+        let (items, assign, centers) = (&cl.items, &cl.assign, &cl.centers);
         let mut placed: Vec<usize> = Vec::new();
         for (c, _) in order {
             let mut members: Vec<(usize, f32)> = assign
@@ -334,15 +363,17 @@ impl<'a> PageContext<'a> {
             rows.push(Row { title: "__PENDING__".to_string(), archetype: "thematic".to_string(), kind: String::new(), items: row_items, meta: None });
             placed.push(c);
         }
+        placed
+    }
 
-        let _genre = self.genre.unwrap_or("").to_string();
+    /// Names the rows made by `place_cluster_rows` after what is in them (not after the page genre), no two the same.
+    fn name_cluster_rows(&self, cl: &Clusters, placed: &[usize], first_thematic: usize, rows: &mut [Row], state: &mut PageState) {
         for (ri, &c) in placed.iter().enumerate() {
             let row_idx = first_thematic + ri;
             if row_idx >= rows.len() {
                 break;
             }
             let era = dominant_era(&rows[row_idx].items);
-            // name the row after what is in it, not after the page genre
             let dom = majority_genre(rows[row_idx].items.iter().map(|item| item.genres.as_slice()));
             let second = second_genre(
                 rows[row_idx].items.iter().map(|item| item.genres.as_slice()),
@@ -367,7 +398,7 @@ impl<'a> PageContext<'a> {
                 None,
             ));
             // the name of the group the row is built from, or of the group most of its titles belong to, comes first when it keeps its promise
-            let group_name = cluster_group.get(c).and_then(|key| self.group_names.get(key).cloned()).or_else(|| self.majority_group_name(&row_catalog));
+            let group_name = cl.groups.get(c).and_then(|key| self.group_names.get(key).cloned()).or_else(|| self.majority_group_name(&row_catalog));
             if let Some(n) = group_name {
                 if crate::row_label::name_fits(&n, &row_catalog) && !entry_names_other_kind(&n, self.surface) { candidates.insert(0, n); }
             }
@@ -375,8 +406,6 @@ impl<'a> PageContext<'a> {
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 6);
         }
-
-        rows
     }
 
     /// The name of the group (finest level first) that at least half of the titles belong to, if it has one.
