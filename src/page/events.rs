@@ -234,4 +234,28 @@ impl<'a> PageContext<'a> {
         let hue = id.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
         Some((rows, serde_json::json!({ "id": id, "label_key": "collection.topic", "label": "Streams Collection", "title": topic.name, "description": topic.definition, "images": images, "hue": hue })))
     }
+
+    /// Items of a seasonal sub group ordered by how well they fit the event (centred cosine to the event vector, plus a small quality term), the ones that do not fit left out.
+    /// A sub group whose best titles fit weakly is dropped (an empty list).
+    pub(crate) fn season_fit<'b>(&self, event: &str, items: Vec<&'b CatalogItem>) -> Vec<&'b CatalogItem> {
+        let Some(ev) = self.event_vector(event) else { return items };
+        let mut scored: Vec<(f32, &CatalogItem)> = items
+            .into_iter()
+            .filter_map(|it| {
+                let ix = self.vectors.index_of(it.id)?;
+                if self.vectors.is_zero_row(ix) { return None; }
+                let mut c: Vec<f32> = self.vectors.get_f32(ix).iter().zip(self.mean).map(|(x, m)| x - m).collect();
+                l2_normalize(&mut c);
+                Some((cosine_sim(&c, &ev), it))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+        let top: Vec<f32> = scored.iter().take(15).map(|s| s.0).collect();
+        if top.len() < 8 { return Vec::new(); }
+        let mean_top = top.iter().sum::<f32>() / top.len() as f32;
+        tracing::debug!("season fit {event}: top {mean_top:.3}, best {:.3}", top[0]);
+        let floor = if KEYWORD_EVENTS.contains(&event) { f32::MIN } else { SEASON_MIN_FIT };
+        if mean_top < floor { return Vec::new(); }
+        scored.into_iter().filter(|(f, _)| *f >= floor * 0.8).map(|(_, it)| it).collect()
+    }
 }
