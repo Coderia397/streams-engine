@@ -108,7 +108,7 @@ impl<'a> PageContext<'a> {
             // awards or adult genres: a "2000s Romantic Films" row is not a children's row even when its titles are rated PG)
             ("any", true) => {
                 let tpl = r.def.template.as_deref().unwrap_or("");
-                let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject}");
+                let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject}" | "{event} {format}" | "{event} {genre} {format}" | "{event}");
                 plain && r.def.rules.genre_specs.iter().all(|g| KID_GENRES.contains(&g.as_str()))
             }
             _ => true,
