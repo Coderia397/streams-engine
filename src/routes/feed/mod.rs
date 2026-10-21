@@ -17,9 +17,8 @@ use crate::identity::MaybeCaller;
 use crate::page::{PageAsk, PageContext};
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::header,
     response::IntoResponse,
-    Json,
 };
 use query::{parse_taste, FeedRequest};
 use serde_json::json;
@@ -38,11 +37,13 @@ pub async fn feed(
     let session = SessionView::of(&state, req.session_id.as_deref());
     let slot = cache::slot();
     let key = cache::page_key(&req, &session, slot);
+    // A page is built once per key: callers that ask for it while it is being built wait for that build, and a cached page goes out as the text it was stored as.
+    let body = state.feed_cache.get_with(key, build_page_body(&state, &req, &session, slot)).await;
+    ([(header::CONTENT_TYPE, "application/json")], body)
+}
 
-    if let Some(cached) = state.feed_cache.get(&key).await {
-        return (StatusCode::OK, Json(serde_json::from_str::<serde_json::Value>(&cached).unwrap()));
-    }
-
+/// The response of one page as JSON text.
+async fn build_page_body(state: &AppState, req: &FeedRequest, session: &SessionView, slot: u64) -> String {
     let catalog = state.catalog.load();
     let fresh = state.fresh.load();
     let genre_spec = req.genre.as_deref().map(|g| crate::genre_spec::resolve(g, req.surface));
@@ -60,7 +61,7 @@ pub async fn feed(
         state.vault.blend_taste(&affinities)
     };
 
-    let noise_session = cache::noise_session(&req, slot);
+    let noise_session = cache::noise_session(req, slot);
     let ask = PageAsk {
         surface: req.surface,
         genre: req.genre.as_deref(),
@@ -73,7 +74,7 @@ pub async fn feed(
         session: if req.session_id.is_some() { noise_session.as_str() } else { "" },
         signals: &req.signals,
     };
-    let ctx = PageContext::new(&state, &catalog, &fresh, ask);
+    let ctx = PageContext::new(state, &catalog, &fresh, ask);
 
     let found = match req.collection.as_deref() {
         Some(c) if c.starts_with("kids_") => ctx.build_kids_collection(c).await,
@@ -102,10 +103,5 @@ pub async fn feed(
         "chips":       if req.genre.is_none() && req.language.is_none() { ctx.season_chips() } else { Vec::new() },
         "rows":        rows,
     });
-    let response_str = serde_json::to_string(&response).unwrap();
-
-    // Cache the result
-    state.feed_cache.insert(key, response_str).await;
-
-    (StatusCode::OK, Json(response))
+    serde_json::to_string(&response).unwrap()
 }

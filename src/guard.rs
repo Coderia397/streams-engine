@@ -16,6 +16,7 @@ use axum::{
 };
 use moka::sync::Cache;
 use serde_json::json;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -24,17 +25,26 @@ use crate::app::AppState;
 
 const OPEN_ROUTES: [&str; 2] = ["/api/health", "/api/features"];
 
-fn counters() -> &'static Cache<String, u32> {
-    static C: OnceLock<Cache<String, u32>> = OnceLock::new();
+/// Calls per caller in the current minute. The minute starts at the caller's first call and later calls do not extend it (a counter that every call renewed never expired for a caller
+/// who kept calling at least once a minute, so an active caller was eventually refused for good).
+fn counters() -> &'static Cache<String, Arc<AtomicU32>> {
+    static C: OnceLock<Cache<String, Arc<AtomicU32>>> = OnceLock::new();
     C.get_or_init(|| Cache::builder().time_to_live(Duration::from_secs(60)).max_capacity(100_000).build())
 }
 
+/// Counts one more call of this caller and returns how many calls it has made this minute (concurrent calls are all counted).
+fn count_call(key: String) -> u32 {
+    counters().get_with(key, || Arc::new(AtomicU32::new(0))).fetch_add(1, Ordering::Relaxed) + 1
+}
+
 fn per_minute() -> u32 {
-    std::env::var("ENGINE_RATE_PER_MINUTE").ok().and_then(|v| v.parse().ok()).unwrap_or(600)
+    static LIMIT: OnceLock<u32> = OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("ENGINE_RATE_PER_MINUTE").ok().and_then(|v| v.parse().ok()).unwrap_or(600))
 }
 
 fn is_open() -> bool {
-    std::env::var("ENGINE_OPEN").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+    static OPEN: OnceLock<bool> = OnceLock::new();
+    *OPEN.get_or_init(|| std::env::var("ENGINE_OPEN").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false))
 }
 
 fn caller_key(req: &Request) -> String {
@@ -53,10 +63,7 @@ pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next)
         return next.run(req).await;
     }
     // the rate first, so a flood of bad calls costs little
-    let key = caller_key(&req);
-    let n = counters().get(&key).unwrap_or(0) + 1;
-    counters().insert(key, n);
-    if n > per_minute() {
+    if count_call(caller_key(&req)) > per_minute() {
         return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "30")], Json(json!({ "error": "too many requests" }))).into_response();
     }
     if let (Some(identity), false) = (&state.identity, is_open()) {
@@ -93,6 +100,15 @@ pub fn cors() -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_call_is_counted_even_when_calls_arrive_together() {
+        let key = format!("test-{}", std::process::id());
+        let handles: Vec<_> = (0..8).map(|_| { let k = key.clone(); std::thread::spawn(move || (0..250).for_each(|_| { count_call(k.clone()); })) }).collect();
+        handles.into_iter().for_each(|h| h.join().unwrap());
+        assert_eq!(count_call(key), 2001);
+        assert_eq!(count_call("another caller".to_string()), 1);
+    }
 
     #[test]
     fn the_site_and_development_origins_are_allowed_and_others_are_not() {
