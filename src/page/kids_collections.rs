@@ -26,7 +26,7 @@ fn sentence(description: &str) -> String {
     }
     let cut: String = first.chars().take(120).collect();
     let cut = cut.rsplit_once(' ').map_or(cut.clone(), |(a, _)| a.to_string());
-    format!("{}…", cut.trim_end_matches(|c: char| c == ',' || c == ' '))
+    format!("{}…", cut.trim_end_matches([',', ' ']))
 }
 
 /// The vocabulary rows that may lead a collection: not the film and series twins of a theme, not the editorial rows.

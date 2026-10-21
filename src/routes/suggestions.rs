@@ -44,7 +44,7 @@ pub async fn suggestions(State(state): State<Arc<AppState>>, MaybeCaller(caller)
     let ok = |i: &CatalogItem| crate::page::chart_ok(i) && i.release_year.is_none_or(|y| y <= year) && !seen.contains(&i.id) && maturity.is_none_or(|m| crate::page::maturity_allows_with(m, &state.profiles, i));
 
     let pool: Vec<&CatalogItem> = catalog.values().filter(|i| i.popularity >= 6.0 && ok(i)).collect();
-    fn by<'a>(mut v: Vec<(f32, &'a CatalogItem)>) -> Vec<&'a CatalogItem> {
+    fn by(mut v: Vec<(f32, &CatalogItem)>) -> Vec<&CatalogItem> {
         v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.id.cmp(&b.1.id)));
         v.into_iter().take(60).map(|(_, i)| i).collect()
     }
