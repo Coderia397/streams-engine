@@ -28,8 +28,14 @@ const DIVERSE_HEAD: usize = 24;
 const PLACE_SHARE: f32 = 0.10;
 const ERA_SHARE: f32 = 0.08;
 
+/// Share of animated titles a row that is not about animation may hold on a page that is not a child's.
+const ANIMATION_SHARE: f32 = 0.25;
+
 /// Moods Netflix keeps below the fold.
 const HARSH_MOODS: &[&str] = &["Violent", "Raunchy", "Gory", "Steamy", "Scandalous", "Scary", "Ominous", "Chilling"];
+
+/// Moods a row may be named for on a child's page.
+const KID_MOODS: &[&str] = &["Feel-Good", "Heartfelt", "Goofy", "Quirky", "Imaginative", "Charming", "Exciting", "Inspiring", "Fun", "Cute", "Whimsical", "Magical", "Humorous", "Relaxing", "Witty", "Epic"];
 
 /// Genres a row may be named for on a child's page.
 const KID_GENRES: &[&str] = &["Animation", "Family", "Adventure", "Comedy", "Fantasy", "Kids", "Science Fiction", "Music", "Action", "Documentary", "Reality", "Mystery"];
@@ -109,7 +115,8 @@ impl<'a> PageContext<'a> {
             ("any", true) => {
                 let tpl = r.def.template.as_deref().unwrap_or("");
                 let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject}" | "{event} {format}" | "{event} {genre} {format}" | "{event}");
-                plain && r.def.rules.genre_specs.iter().all(|g| KID_GENRES.contains(&g.as_str()))
+                let mood = matches!(tpl, "{mood} {format}" | "{mood} {genre} {format}" | "{mood} {genre}") && KID_MOODS.iter().any(|m| r.def.name.starts_with(m));
+                (plain || mood) && r.def.rules.genre_specs.iter().all(|g| KID_GENRES.contains(&g.as_str()))
             }
             _ => true,
         };
@@ -253,6 +260,7 @@ impl<'a> PageContext<'a> {
     pub(crate) fn request_row(&self, req: &Request, taken: &HashSet<u32>) -> Option<Row> {
         // a composed row goes as deep as the page's titles allow (Netflix's rows hold 150 when the supply is there; a row's median on Netflix only reflects its pages' scopes)
         let depth = if req.free { MAX_ROW_DEPTH } else { ROW_SIZE };
+        let min_items = if req.free && self.genre_spec.is_some() { FIRST_SCREEN } else { REQUEST_MIN_ITEMS };
         let look = if req.free { REQUEST_LOOK.max(depth * 3) } else { REQUEST_LOOK };
         let eligible: Vec<&CatalogItem> = req
             .members
@@ -261,7 +269,7 @@ impl<'a> PageContext<'a> {
             .filter(|i| !taken.contains(&i.id) && self.page_pool_member(i))
             .take(look)
             .collect();
-        if eligible.len() < REQUEST_MIN_ITEMS {
+        if eligible.len() < min_items {
             return None;
         }
         let mut ranked: Vec<(f32, u32, Vec<f32>)> = eligible
@@ -277,9 +285,39 @@ impl<'a> PageContext<'a> {
             })
             .collect();
         ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        // Animation is a world of its own: on a page that is not a child's, a row whose rules do not ask for animation or anime holds at most a share of animated
+        // titles and none in its first tiles (Netflix's "Exciting Series" has one animated title in five; ours had twelve of twelve before this rule)
+        let about_animation = req.def.rules.anime == Some(true)
+            || req.def.rules.genre_specs.iter().any(|g| g == "Animation" || g == "anime")
+            || req.def.rules.genres_all.iter().flatten().any(|g| g == "Animation")
+            || req.def.name.to_lowercase().contains("anim")
+            || req.def.name.to_lowercase().contains("anime");
+        let mut diverse_pool = REQUEST_RANKED;
+        if req.free && !self.is_kids() && !about_animation {
+            let animated = |id: &u32| self.catalog.get(id).is_some_and(|i| i.is_anime || i.genres.iter().any(|g| g == "Animation"));
+            let total = ranked.len();
+            let cap = (total as f32 * ANIMATION_SHARE) as usize;
+            let mut kept = 0usize;
+            let mut head: Vec<(f32, u32, Vec<f32>)> = Vec::with_capacity(total);
+            let mut late: Vec<(f32, u32, Vec<f32>)> = Vec::new();
+            for r in ranked {
+                if animated(&r.1) {
+                    if kept < cap { kept += 1; late.push(r); }
+                } else {
+                    head.push(r);
+                }
+            }
+            // animated titles sit after the diverse head (the first DIVERSE_HEAD tiles are chosen among the others)
+            let at = head.len().min(DIVERSE_HEAD);
+            let tail: Vec<_> = head.split_off(at);
+            ranked = head;
+            ranked.extend(late);
+            ranked.extend(tail);
+            diverse_pool = DIVERSE_HEAD.min(ranked.len());
+        }
         let items = if req.free {
             // the first screens are diverse (MMR over the best ranked), the tail is the ranking itself, with no title twice and the franchise cap on the head
-            let head: Vec<(u32, Vec<f32>)> = ranked.iter().take(REQUEST_RANKED).map(|(_, id, v)| (*id, v.clone())).collect();
+            let head: Vec<(u32, Vec<f32>)> = ranked.iter().take(diverse_pool).map(|(_, id, v)| (*id, v.clone())).collect();
             let picked = greedy_mmr(&req.anchor, &head, DIVERSE_HEAD.min(depth), MMR_LAMBDA);
             let mut items = self.diverse_titles(&picked, DIVERSE_HEAD.min(depth));
             let mut seen: HashSet<u32> = items.iter().map(|i| i.id).collect();
@@ -300,7 +338,7 @@ impl<'a> PageContext<'a> {
             let picked = greedy_mmr(&req.anchor, &candidates, ROW_SIZE * 2, MMR_LAMBDA);
             self.diverse_titles(&picked, ROW_SIZE)
         };
-        if items.len() < REQUEST_MIN_ITEMS {
+        if items.len() < min_items {
             return None;
         }
         let row_catalog: Vec<&CatalogItem> = items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();

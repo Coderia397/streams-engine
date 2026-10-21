@@ -65,7 +65,8 @@ impl<'a> PageContext<'a> {
         // a page of composed rows is what its supply gives (Netflix's Cult page has 3 rows); the older request page needs a full first screen
         let floor = if self.composed_rows() { COMPOSED_PAGE_MIN_ROWS } else { REQUEST_PAGE_MIN_ROWS };
         let by_request = by_request && rows.iter().filter(|r| r.archetype != "trending").count() >= floor;
-        if !by_request {
+        // a page of composed rows never falls back to the older builders: what its supply gives is the page
+        if !by_request && !(self.composed_rows() && self.request_page()) {
             rows = self.build_page_rows_inner().await;
         }
         self.layer_season(&mut rows, by_request).await;
