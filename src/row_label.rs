@@ -468,7 +468,20 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     out
 }
 
-/// Does a written row title keep its promise? Each genre word in it (comedy, crime, war ...) must be a genre of at least 40 percent of the items shown, and a leading decade
+/// Nationality and language words that make a promise about where titles come from: (word, origin country codes, original language codes). English and Greek are left out:
+/// English is the language of most titles from every country, and "Greek" mostly names myths.
+const ORIGIN_WORDS: &[(&str, &[&str], &[&str])] = &[
+    ("american", &["US"], &[]), ("british", &["GB"], &[]), ("irish", &["IE"], &[]), ("canadian", &["CA"], &[]), ("australian", &["AU"], &[]),
+    ("korean", &["KR"], &["ko"]), ("japanese", &["JP"], &["ja"]), ("chinese", &["CN", "HK", "TW"], &["zh", "cn"]), ("taiwanese", &["TW"], &[]),
+    ("thai", &["TH"], &["th"]), ("indian", &["IN"], &["hi", "ta", "te", "ml", "kn", "bn", "mr", "pa"]), ("bollywood", &["IN"], &["hi"]),
+    ("french", &["FR"], &["fr"]), ("german", &["DE"], &["de"]), ("italian", &["IT"], &["it"]), ("spanish", &["ES"], &["es"]),
+    ("portuguese", &["PT", "BR"], &["pt"]), ("brazilian", &["BR"], &["pt"]), ("mexican", &["MX"], &["es"]), ("turkish", &["TR"], &["tr"]),
+    ("russian", &["RU"], &["ru"]), ("swedish", &["SE"], &["sv"]), ("danish", &["DK"], &["da"]), ("norwegian", &["NO"], &["no", "nb", "nn"]),
+    ("dutch", &["NL"], &["nl"]), ("polish", &["PL"], &["pl"]),
+];
+
+/// Does a written row title keep its promise? Each genre word in it (comedy, crime, war ...) must be a genre of at least 40 percent of the items shown, a nationality or language
+/// word ("Korean", "British") must be the origin of at least 40 percent, and a leading decade
 /// ("90s", "1980s") must hold at least 60 percent of their release years. Used before a name written for a group is shown as the row title.
 pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
     if items.is_empty() {
@@ -476,7 +489,7 @@ pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
     }
     let n = items.len() as f32;
     const GENRE_WORDS: &[(&str, &str)] = &[
-        ("action", "action"), ("adventure", "adventure"), ("animation", "animation"), ("anime", "animation"), ("comed", "comedy"), ("crime", "crime"), ("documentar", "documentary"),
+        ("action", "action"), ("adventure", "adventure"), ("animat", "animation"), ("cartoon", "animation"), ("anime", "animation"), ("comed", "comedy"), ("crime", "crime"), ("documentar", "documentary"),
         ("drama", "drama"), ("family", "family"), ("fantasy", "fantasy"), ("histor", "history"), ("horror", "horror"), ("music", "music"), ("mystery", "mystery"), ("mysteries", "mystery"),
         ("romanc", "romance"), ("rom-com", "romance"), ("rom-com", "comedy"), ("romcom", "romance"), ("romcom", "comedy"), ("sci-fi", "sci"), ("thriller", "thriller"), ("war", "war"), ("western", "western"), ("reality", "reality"),
     ];
@@ -490,6 +503,23 @@ pub fn name_fits(name: &str, items: &[&CatalogItem]) -> bool {
                     return false;
                 }
             }
+        }
+    }
+    // a nationality or language word ("Korean", "British", "Spanish") must be the origin of at least 40 percent of the items; two such words together count as one group
+    let mut origin: Vec<&(&str, &[&str], &[&str])> = Vec::new();
+    for w in name.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()) {
+        let lw = w.to_lowercase();
+        if let Some(rule) = ORIGIN_WORDS.iter().find(|r| r.0 == lw) {
+            origin.push(rule);
+        }
+    }
+    if !origin.is_empty() {
+        let have = items
+            .iter()
+            .filter(|i| origin.iter().any(|(_, countries, langs)| primary_country(i).is_some_and(|c| countries.contains(&c)) || langs.contains(&i.original_language.as_str())))
+            .count() as f32;
+        if have < 0.4 * n {
+            return false;
         }
     }
     // every decade named anywhere in the title ("90s", "2000s", "of the 1950s and 1960") must hold the years of the items: together they cover at least 60 percent
@@ -623,5 +653,41 @@ mod name_fit_tests {
         let b: Vec<&CatalogItem> = horror.iter().collect();
         assert!(name_fits("Holiday Rom-Coms", &a));
         assert!(!name_fits("Spooky Fantasy Rom-Coms", &b));
+    }
+
+    #[test]
+    fn animated_and_cartoon_names_need_animation() {
+        let live: Vec<CatalogItem> = (2000..2010).map(|y| item(y, &["Comedy", "Family"])).collect();
+        let toons: Vec<CatalogItem> = (2000..2010).map(|y| item(y, &["Animation", "Adventure", "Family"])).collect();
+        let a: Vec<&CatalogItem> = live.iter().collect();
+        let b: Vec<&CatalogItem> = toons.iter().collect();
+        assert!(!name_fits("Animated Bear Adventures", &a));
+        assert!(name_fits("Animated Bear Adventures", &b));
+        assert!(!name_fits("Cartoon Capers", &a));
+        assert!(name_fits("Cartoon Capers", &b));
+    }
+
+    #[test]
+    fn a_nationality_word_needs_titles_from_there() {
+        let mk = |country: &str, lang: &str| -> Vec<CatalogItem> {
+            (2000..2010).map(|y| { let mut it = item(y, &["Thriller", "Crime"]); it.countries = vec![country.into()]; it.original_language = lang.into(); it }).collect()
+        };
+        let korean = mk("KR", "ko");
+        let american = mk("US", "en");
+        let british = mk("GB", "en");
+        let k: Vec<&CatalogItem> = korean.iter().collect();
+        let u: Vec<&CatalogItem> = american.iter().collect();
+        let g: Vec<&CatalogItem> = british.iter().collect();
+        assert!(name_fits("Korean Thrillers", &k));
+        assert!(!name_fits("Korean Thrillers", &u));
+        assert!(name_fits("British Crime Stories", &g));
+        assert!(!name_fits("British Crime Stories", &u));
+        assert!(name_fits("American Crime Stories", &u));
+        // a name without a nationality is not affected, and a language alone counts (Korean titles with no country listed)
+        assert!(name_fits("Crime Stories", &u));
+        let mut no_country = mk("KR", "ko");
+        for it in no_country.iter_mut() { it.countries.clear(); }
+        let n: Vec<&CatalogItem> = no_country.iter().collect();
+        assert!(name_fits("Korean Thrillers", &n));
     }
 }

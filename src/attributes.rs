@@ -19,7 +19,6 @@ fn keyword(it: &CatalogItem, words: &[&str]) -> bool {
 }
 
 pub const SPECS: &[AttrSpec] = &[
-    AttrSpec { id: "under_90", media: "movie", title_movie: "Films Under 90 Minutes", title_tv: "", title_both: "Films Under 90 Minutes", test: |i| i.media_type == "movie" && (60..90).contains(&i.runtime) },
     AttrSpec { id: "half_hour_comedy", media: "tv", title_movie: "", title_tv: "Half Hour Comedies", title_both: "Half Hour Comedies", test: |i| i.media_type == "tv" && (5..=32).contains(&i.runtime) && i.genres.iter().any(|g| g == "Comedy") },
     AttrSpec { id: "limited_series", media: "tv", title_movie: "", title_tv: "Limited Series", title_both: "Limited Series", test: |i| i.media_type == "tv" && i.tv_type.as_deref() == Some("Miniseries") },
     AttrSpec { id: "books", media: "both", title_movie: "Films Based on Books", title_tv: "Series Based on Books", title_both: "Based on Books", test: |i| keyword(i, &["based on novel or book", "based on young adult novel"]) },

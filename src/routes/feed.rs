@@ -322,6 +322,8 @@ pub async fn feed(
         Some((rows, header)) => (rows, Some(header)),
         None => (ctx.build_page().await, None),
     };
+    let blocked = blocked_row_titles(&state.config.db_path);
+    let page_rows: Vec<Row> = page_rows.into_iter().filter(|r| !blocked.contains(&r.title.to_lowercase())).collect();
     let all_rows = to_client_rows(page_rows, &session_seen, &state.profiles, &fresh);
     let has_more = all_rows.len() > offset + per_page && offset + per_page < cap;
     let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(offset).take(per_page).collect();
@@ -345,6 +347,15 @@ pub async fn feed(
     state.feed_cache.insert(key, response_str).await;
 
     (StatusCode::OK, Json(response))
+}
+
+/// Row titles taken out of every page (`blocked_rows.json` next to the database: a list of titles, compared without case), read on every request so the file can be edited live.
+fn blocked_row_titles(db_path: &str) -> HashSet<String> {
+    std::path::Path::new(db_path).parent()
+        .and_then(|d| std::fs::read_to_string(d.join("blocked_rows.json")).ok())
+        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
+        .map(|titles| titles.into_iter().map(|t| t.to_lowercase()).collect())
+        .unwrap_or_default()
 }
 
 /// Convert engine rows to the client FeedRow shape. Titles are deduplicated
