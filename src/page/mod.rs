@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Public API surface — functions used at runtime via dynamic dispatch
 
 mod access;
 mod charts;

@@ -28,7 +28,6 @@ pub(crate) const MEMBER_DROP: f32 = 0.22;
 /// seeds trained on the quality pool). Rerun the script after any embedding change; thresholds from another space do not transfer.
 /// Measured 2026-10-04: old to new COHERENCE_OK 0.55 to 0.60 (item to medoid cosine), COHERENCE_WEAK 0.50 to 0.56 (mean pairwise
 /// cosine of a row), MMD_MAX_INTER_SIM 0.76 to 0.74 and BYW_MAX_CENTROID_SIM 0.68 to 0.63 (centroid to centroid).
-pub(crate) const COHERENCE_STRONG: f32 = 0.74;
 pub(crate) const COHERENCE_OK:     f32 = 0.60;
 pub(crate) const COHERENCE_WEAK:   f32 = 0.56;
 pub(crate) const COHERENCE_MIN_ITEMS: usize = 6;

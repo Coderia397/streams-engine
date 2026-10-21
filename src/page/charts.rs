@@ -1,19 +1,10 @@
 use super::*;
 
 impl<'a> PageContext<'a> {
-    /// Puts the Top 10 rows among the rows of the page by value, the way rows are chosen for a page: every row has a value,
-    /// the page is filled greedily from the highest, and a row loses value for being like a row already placed (two charts
-    /// are alike, so the second waits). Nothing says "second" or "third": a profile with a clear taste values a chart less
-    /// than rows made for it, so the chart sinks; a new profile values a chart more, so it rises. A session's noise moves a
-    /// chart a little so pages differ between sessions.
+    /// Places the Top 10 rows, and every other row that has a fixed place (continue watching, your list, personal rows, New Releases, collections), among the topic rows of
+    /// the page. Each kind sits near its own slot (`tuning.rs`, SLOT_*), moved a little by the session's noise inside a window per kind so pages differ between sessions;
+    /// the topic rows keep their order around them, and no genre leads more than one of three rows in a row.
     pub(super) fn place_charts(&self, rows: Vec<Row>) -> Vec<Row> {
-        /// Value of a chart for a profile without taste, and how much taste takes away.
-        const CHART_BASE: f32 = 0.80;
-        const CHART_TASTE_PENALTY: f32 = 0.30;
-        const CHART_NOISE: f32 = 0.35;
-        /// How much resemblance to a row already placed costs.
-        const SIMILAR_COST: f32 = 0.35;
-
         let mut charts = self.build_chart_rows();
         let (old_charts, mut body): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.archetype == "trending");
         if charts.is_empty() {
