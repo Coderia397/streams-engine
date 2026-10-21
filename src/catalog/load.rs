@@ -125,6 +125,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
 
     apply_popularity_overlay(&mut map, db_path);
     apply_awards(&mut map, db_path);
+    crate::catalog::overlays::apply_netflix_tags(&mut map, db_path);
     apply_categories(&mut map, db_path);
     let catalog = Catalog::new(map);
     info!("Catalog loaded: {} items, {} on the chart list", catalog.len(), catalog.chart_keys.len());

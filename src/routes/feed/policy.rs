@@ -65,7 +65,8 @@ pub fn genre_row_cap(catalog: &CatalogMap, profiles: &ProfileStore, surface: &st
         .count();
     // a judged niche page is small by nature: its titles may repeat across two visits
     // a children's page has a small pool and its rows may share titles (as on Netflix), so each row needs half as many
-    let per_row = if spec.is_judged() || maturity.is_some_and(|m| m.is_kids()) { ROW_TITLES } else { ROW_TITLES * SESSION_TURNOVER };
+    // composed rows (note 101) keep only their first screens unique across the page, so a row costs the pool FIRST_SCREEN titles, not a whole row
+    let per_row = if crate::requests::enabled() { crate::page::FIRST_SCREEN * SESSION_TURNOVER } else if spec.is_judged() || maturity.is_some_and(|m| m.is_kids()) { ROW_TITLES } else { ROW_TITLES * SESSION_TURNOVER };
     (pool / per_row).min(NETFLIX_ROWS_CAP)
 }
 

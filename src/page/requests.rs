@@ -10,6 +10,8 @@ use crate::requests::Request;
 const REQUEST_MIN_ITEMS: usize = 12;
 /// Two rows of one page whose request centres are closer than this are too alike (centred cosine).
 const REQUEST_MAX_ANCHOR_SIM: f32 = 0.80;
+/// The same limit on a genre page, whose rows all share the genre's direction.
+const REQUEST_MAX_ANCHOR_SIM_GENRE: f32 = 0.90;
 /// At most this share of a page's rows comes from one kind of request (theme, era, origin, mood, calendar).
 const REQUEST_KIND_SHARE: f32 = 0.45;
 /// Titles ranked by closeness to the request's centre before diversity is applied.
@@ -26,12 +28,15 @@ const DIVERSE_HEAD: usize = 24;
 const PLACE_SHARE: f32 = 0.10;
 const ERA_SHARE: f32 = 0.08;
 
+/// Moods Netflix keeps below the fold.
+const HARSH_MOODS: &[&str] = &["Violent", "Raunchy", "Gory", "Steamy", "Scandalous", "Scary", "Ominous", "Chilling"];
+
 /// Genres a row may be named for on a child's page.
 const KID_GENRES: &[&str] = &["Animation", "Family", "Adventure", "Comedy", "Fantasy", "Kids", "Science Fiction", "Music", "Action", "Documentary", "Reality", "Mystery"];
 /// On a genre page a composed row needs this share of its titles inside the page, unless its own rules name the page's genre.
-const GENRE_PAGE_MIN_SHARE: f32 = 0.25;
+const GENRE_PAGE_MIN_SHARE: f32 = 0.15;
 /// Rows a composed page holds at most (Netflix's Home, Series and Films: 47 to 48 rows).
-const COMPOSED_ROWS_CAP: usize = 48;
+const COMPOSED_ROWS_CAP: usize = 40;   // plus the personal and chart rows the page adds, about 48 in all
 
 /// The family a composed row belongs to for the page's rhythm: place (an origin block), era (a decade block), or topic (everything else).
 fn family_of(r: &Request) -> &'static str {
@@ -133,12 +138,14 @@ impl<'a> PageContext<'a> {
         let fits = if r.free && self.surface != "both" && r.owner_surface == self.surface { 0.15 } else { 0.0 };
         // a deep row (Netflix's median row holds 150 titles) leads a thin one: up to 0.3 for 150 or more members
         let depth = if r.free { 0.3 * ((r.members.len().max(1) as f32).ln() / (MAX_ROW_DEPTH as f32).ln()).min(1.0) } else { 0.0 };
+        // Netflix places its harsher moods (Violent, Raunchy, Gory, Steamy, Scandalous, Scary) in the lower half of a page
+        let harsh = if r.free && HARSH_MOODS.iter().any(|m| r.def.name.starts_with(m)) { 0.45 } else { 0.0 };
         let taste_fit = taste.map_or(0.0, |t| 0.6 * cosine_sim(t, &r.anchor));
         // broadly known requests lead; a request made mostly of children's titles sinks on a page that is not a child's
         let appeal = 0.6 * r.appeal;
         let children = if self.is_kids() { 0.0 } else { 0.6 * r.kid_share };
         let noise = if self.session.is_empty() { 0.0 } else { 0.35 * entry_noise(self.session, id_number(&r.def.id)) };
-        prior + known + fits + depth + taste_fit + appeal - children + noise
+        prior + known + fits + depth + taste_fit + appeal - children - harsh + noise
     }
 
     /// The vector of a title centred on the corpus mean, unit length.
@@ -218,7 +225,9 @@ impl<'a> PageContext<'a> {
             if composed && per_family.get(fam).copied().unwrap_or(0) >= family_cap(fam) {
                 continue;
             }
-            if placed.iter().any(|a| cosine_sim(a, &req.anchor) > REQUEST_MAX_ANCHOR_SIM) || !names.insert(req.def.name.to_lowercase()) {
+            // rows of one genre page all lean the genre's way, so two of them may sit closer than two rows of Home
+            let max_sim = if genre_page { REQUEST_MAX_ANCHOR_SIM_GENRE } else { REQUEST_MAX_ANCHOR_SIM };
+            if placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim) || !names.insert(req.def.name.to_lowercase()) {
                 continue;
             }
             let Some(mut row) = self.request_row(req, &taken) else { continue };

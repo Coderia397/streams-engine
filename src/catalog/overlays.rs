@@ -64,6 +64,26 @@ pub(crate) fn apply_awards(map: &mut HashMap<u32, CatalogItem>, db_path: &str) {
     info!("Awards: {added} titles marked from {}", path.display());
 }
 
+/// Adds Netflix's per title tags (`netflix_tags.json` next to the database: item key -> ["Suspenseful", "Organized Crime", ...], note 102) to the keywords of the
+/// titles as `nf:<tag>` in lower case, so a composed row can ask for a mood or subject Netflix itself gave the title. A missing file adds nothing.
+pub(crate) fn apply_netflix_tags(map: &mut HashMap<u32, CatalogItem>, db_path: &str) {
+    let Some(path) = std::path::Path::new(db_path).parent().map(|d| d.join("netflix_tags.json")) else { return };
+    let Some(raw) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<HashMap<String, Vec<String>>>(&t).ok()) else { return };
+    let mut titles = 0usize;
+    for (key, tags) in raw {
+        let Ok(key) = key.parse::<u32>() else { continue };
+        let Some(item) = map.get_mut(&key) else { continue };
+        titles += 1;
+        for t in tags {
+            let tag = format!("nf:{}", t.trim().to_lowercase());
+            if !item.keywords.contains(&tag) {
+                item.keywords.push(tag);
+            }
+        }
+    }
+    info!("Netflix tags: {titles} titles marked from {}", path.display());
+}
+
 /// True once `categories_v1.json` was applied: the pages it covers then use the judged membership alone (the old keyword rules only propose candidates).
 pub static CATEGORIES_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

@@ -177,29 +177,38 @@ impl<'a> PageContext<'a> {
             r.items.iter().for_each(|i| { used.insert(i.id); });
             rows.push(r);
         }
-        // Your Next Watch: close to the latest watched titles
-        if let Some(t) = self.taste_of(&sig.recent.iter().take(3).map(|k| (*k, 1.0)).collect::<Vec<_>>()) {
-            let keys = self.neighbour_keys(&t, 600).await;
-            let ranked = self.rank_by_taste(&keys, &used, &t, false);
-            if let Some(mut r) = self.row_of("Your Next Watch", "personal", &ranked) {
-                r.archetype = "next_watch".to_string();
-                r.meta = meta("row.your_next_watch", json!({}), Some(json!({ "kind": "recent" })));
+        let composed = self.composed_rows();
+        // Your Next Watch: close to the latest watched titles; a profile without history gets well liked titles chosen by its session
+        let next = match self.taste_of(&sig.recent.iter().take(3).map(|k| (*k, 1.0)).collect::<Vec<_>>()) {
+            Some(t) => {
+                let keys = self.neighbour_keys(&t, 600).await;
+                self.rank_by_taste(&keys, &used, &t, false)
+            }
+            None if composed => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(3000)], &used, false, 300_007)),
+            None => Vec::new(),
+        };
+        if let Some(mut r) = self.row_of("Your Next Watch", "personal", &next) {
+            r.archetype = "next_watch".to_string();
+            r.meta = meta("row.your_next_watch", json!({}), Some(json!({ "kind": if sig.recent.is_empty() { "popular" } else { "recent" } })));
+            r.items.iter().for_each(|i| { used.insert(i.id); });
+            rows.push(r);
+        }
+        // We Think You'll Love These: near what the profile liked or saved (not what it watched last); on every composed page, and for a new profile by session
+        if on_home || composed {
+            let taste_lk = self.taste_of(&sig.liked.iter().take(10).map(|k| (*k, 1.0)).chain(sig.saved.iter().take(10).map(|k| (*k, 0.8))).collect::<Vec<_>>());
+            let love = match taste_lk {
+                Some(t) => {
+                    let keys = self.neighbour_keys(&t, 800).await;
+                    self.rank_by_taste(&keys, &used, &t, false)
+                }
+                None if composed => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(4000)], &used, false, 400_009)),
+                None => Vec::new(),
+            };
+            if let Some(mut r) = self.row_of("We Think You'll Love These", "personal", &love) {
+                r.archetype = "love_these".to_string();
+                r.meta = meta("row.we_think_youll_love", json!({}), Some(json!({ "kind": if sig.liked.is_empty() && sig.saved.is_empty() { "popular" } else { "liked" } })));
                 r.items.iter().for_each(|i| { used.insert(i.id); });
                 rows.push(r);
-            }
-        }
-        // We Think You'll Love These: near what the profile liked or saved (not what it watched last)
-        if on_home {
-            let taste_lk = self.taste_of(&sig.liked.iter().take(10).map(|k| (*k, 1.0)).chain(sig.saved.iter().take(10).map(|k| (*k, 0.8))).collect::<Vec<_>>());
-            if let Some(t) = taste_lk {
-                let keys = self.neighbour_keys(&t, 800).await;
-                let ranked = self.rank_by_taste(&keys, &used, &t, false);
-                if let Some(mut r) = self.row_of("We Think You'll Love These", "personal", &ranked) {
-                    r.archetype = "love_these".to_string();
-                    r.meta = meta("row.we_think_youll_love", json!({}), Some(json!({ "kind": "liked" })));
-                    r.items.iter().for_each(|i| { used.insert(i.id); });
-                    rows.push(r);
-                }
             }
             if let Some(r) = self.list_row(&sig.liked, "Familiar Favourites", "favourites", "row.familiar_favourites", "liked") { rows.push(r); }
         }
