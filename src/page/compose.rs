@@ -7,10 +7,17 @@ use super::*;
 
 /// A page made from requests needs this many request rows, else it is built the older way.
 const REQUEST_PAGE_MIN_ROWS: usize = 8;
+/// A page of composed rows needs this many; below it the page is built the older way.
+const COMPOSED_PAGE_MIN_ROWS: usize = 3;
 
 /// The ids of the titles already in a row of the page.
 fn taken_ids(rows: &[Row]) -> HashSet<u32> {
     rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect()
+}
+
+/// The ids in the first screen of every row of the page (composed pages keep only these unique across rows).
+fn first_screen_ids(rows: &[Row]) -> HashSet<u32> {
+    rows.iter().flat_map(|r| r.items.iter().take(FIRST_SCREEN).map(|i| i.id)).collect()
 }
 
 /// The titles of the rows already on the page, lower case.
@@ -55,7 +62,9 @@ impl<'a> PageContext<'a> {
         // with request rows on, the topic rows of the page come from requests (page/requests.rs); a genre page that gets too few falls back to its own builder
         let by_request = self.request_page();
         let mut rows = if by_request { self.build_request_page() } else { Vec::new() };
-        let by_request = by_request && rows.iter().filter(|r| r.archetype != "trending").count() >= REQUEST_PAGE_MIN_ROWS;
+        // a page of composed rows is what its supply gives (Netflix's Cult page has 3 rows); the older request page needs a full first screen
+        let floor = if self.composed_rows() { COMPOSED_PAGE_MIN_ROWS } else { REQUEST_PAGE_MIN_ROWS };
+        let by_request = by_request && rows.iter().filter(|r| r.archetype != "trending").count() >= floor;
         if !by_request {
             rows = self.build_page_rows_inner().await;
         }
@@ -150,17 +159,26 @@ impl<'a> PageContext<'a> {
     }
 
     /// Personal rows, New Releases and collections: added here, placed by slot in `place_charts`.
+    /// On a page of composed rows every page gets them, children's pages included, and every page gets New Releases and Everyone's Watching filtered to its scope
+    /// (Netflix carries New on Netflix on 79 of 92 pages and Everyone's Watching on 31, note 97).
     async fn layer_personal(&self, rows: &mut Vec<Row>) {
-        if self.is_kids() || self.language.is_some() || self.animation.is_some() {
+        let composed = self.composed_rows();
+        if (self.is_kids() && !composed) || self.language.is_some() || self.animation.is_some() {
             return;
         }
-        let taken_now = taken_ids(rows);
+        // composed rows share titles past their first screens, so personal rows avoid only what the first screens show
+        let taken_now = if composed { first_screen_ids(rows) } else { taken_ids(rows) };
         let mut extra = self.build_personal_rows(&taken_now).await;
-        if self.genre.is_none() {
+        if self.genre.is_none() || composed {
             let mut taken_all = taken_now;
             extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
             if let Some(r) = self.build_new_row(&taken_all) {
                 extra.push(r);
+            }
+            if composed {
+                if let Some(r) = self.build_popular_row(&taken_all) {
+                    extra.push(r);
+                }
             }
         }
         rows.extend(extra);

@@ -18,6 +18,7 @@ mod types;
 
 pub use access::*;
 pub use context::*;
+pub use requests::{FIRST_SCREEN, MAX_ROW_DEPTH};
 pub use tuning::*;
 pub use types::*;
 pub(crate) use names::*;

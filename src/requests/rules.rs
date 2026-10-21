@@ -24,6 +24,27 @@ pub struct Rules {
     pub countries_any: Vec<String>,
     /// Anime or not; none asks nothing
     pub anime: Option<bool>,
+    /// Every one of these groups: a title carries at least one genre of each group (a group holds the film and series names of one genre, such as
+    /// ["Action", "Action & Adventure"]); learned from Netflix's rows (rows_v2.json)
+    #[serde(default)]
+    pub genres_all: Vec<Vec<String>>,
+    /// Longest runtime in minutes (film runtime or median episode runtime); a title without a known runtime does not pass
+    pub runtime_max: Option<u32>,
+    /// Every one of these groups: a title carries at least one keyword of each group (a subject, a mood, an award tag), composed rows (requests_v2.json)
+    #[serde(default)]
+    pub keyword_groups: Vec<Vec<String>>,
+    /// None of these original languages ("International": not English)
+    #[serde(default)]
+    pub languages_none: Vec<String>,
+    /// One of these TMDB series types (Miniseries, Scripted, Documentary, Reality ...); a film never passes
+    #[serde(default)]
+    pub tv_types_any: Vec<String>,
+    /// Rating floor with 200 votes or more behind it ("Critically Acclaimed")
+    pub vote_min: Option<f32>,
+    /// Every one of these genres as the engine's genre pages read them (`genre_spec::resolve` on the title's own media type: a Romance or Horror series is found by
+    /// keyword, a Thriller series may be a Mystery), the genre blocks of composed rows
+    #[serde(default)]
+    pub genre_specs: Vec<String>,
 }
 
 impl Rules {
@@ -35,7 +56,7 @@ impl Rules {
         if self.year_min.is_some_and(|y| it.release_year.is_none_or(|r| r < y)) || self.year_max.is_some_and(|y| it.release_year.is_none_or(|r| r > y)) {
             return false;
         }
-        if !self.languages_any.is_empty() && !self.languages_any.iter().any(|l| *l == it.original_language) {
+        if !self.languages_any.is_empty() && !self.languages_any.contains(&it.original_language) {
             return false;
         }
         if !self.countries_any.is_empty() && !it.countries.iter().any(|c| self.countries_any.contains(c)) {
@@ -45,6 +66,27 @@ impl Rules {
             return false;
         }
         if it.genres.iter().any(|g| self.genres_none.contains(g)) {
+            return false;
+        }
+        if !self.genres_all.iter().all(|group| it.genres.iter().any(|g| group.contains(g))) {
+            return false;
+        }
+        if self.runtime_max.is_some_and(|m| it.runtime == 0 || it.runtime > m) {
+            return false;
+        }
+        if !self.languages_none.is_empty() && self.languages_none.contains(&it.original_language) {
+            return false;
+        }
+        if !self.tv_types_any.is_empty() && !it.tv_type.as_deref().is_some_and(|t| self.tv_types_any.iter().any(|w| w == t)) {
+            return false;
+        }
+        if self.vote_min.is_some_and(|v| it.vote_average < v || it.vote_count < 200) {
+            return false;
+        }
+        if !self.genre_specs.iter().all(|g| crate::genre_spec::resolve(g, &it.media_type).matches(it)) {
+            return false;
+        }
+        if !self.keyword_groups.iter().all(|group| it.keywords.iter().any(|k| group.contains(k))) {
             return false;
         }
         if !self.keywords_any.is_empty() && !it.keywords.iter().any(|k| self.keywords_any.contains(k)) {

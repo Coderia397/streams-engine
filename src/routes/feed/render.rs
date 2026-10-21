@@ -6,17 +6,34 @@ use serde_json::{json, Value};
 /// A row with fewer titles than this (after the titles of earlier rows are taken out) is not shown.
 const MIN_ROW_ITEMS: usize = 4;
 
-/// Convert engine rows to the client FeedRow shape. Titles are deduplicated
-/// across rows (earlier rows win) and rows left with too few items are dropped. A row whose name no longer keeps its promise once its shared titles are gone
+/// Convert engine rows to the client FeedRow shape. Titles are deduplicated across rows (earlier rows win) and rows left with too few items are dropped. With
+/// `first_screen_only` (composed rows, note 101) only the first FIRST_SCREEN tiles of each row are kept free of titles shown in the first screen of an earlier row,
+/// as Netflix does (note 97); a title moves back in the row instead of leaving it. A row whose name no longer keeps its promise once its shared titles are gone
 /// (a "Korean Thrillers" row left with too few Korean titles) is dropped too: the name was checked on the titles before they were shared out.
-pub fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &crate::profiles::ProfileStore, fresh: &crate::fresh::FreshStore, catalog: &crate::catalog::CatalogMap) -> Vec<Value> {
+pub fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &crate::profiles::ProfileStore, fresh: &crate::fresh::FreshStore, catalog: &crate::catalog::CatalogMap, first_screen_only: bool) -> Vec<Value> {
+    use crate::page::FIRST_SCREEN;
     let mut seen: HashSet<u32> = HashSet::default();
     let mut out = Vec::new();
     let today = crate::fresh::today_days();
 
     for (i, row) in rows.into_iter().enumerate() {
         let chart = row.archetype == "trending";
-        let kept: Vec<&RowItem> = row.items.iter().filter(|it| !already_seen.contains(&it.id) && !seen.contains(&it.id)).collect();
+        let kept: Vec<&RowItem> = if first_screen_only && !chart {
+            // the first screen takes the first titles not yet in an earlier first screen; the rest of the row follows in its order, the moved titles after it
+            let mut head: Vec<&RowItem> = Vec::new();
+            let mut tail: Vec<&RowItem> = Vec::new();
+            let mut moved: Vec<&RowItem> = Vec::new();
+            for it in row.items.iter().filter(|it| !already_seen.contains(&it.id)) {
+                if head.len() < FIRST_SCREEN {
+                    if seen.contains(&it.id) { moved.push(it) } else { head.push(it) }
+                } else {
+                    tail.push(it);
+                }
+            }
+            head.into_iter().chain(tail).chain(moved).collect()
+        } else {
+            row.items.iter().filter(|it| !already_seen.contains(&it.id) && !seen.contains(&it.id)).collect()
+        };
         if kept.len() < MIN_ROW_ITEMS {
             continue;
         }
@@ -24,7 +41,7 @@ pub fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &cr
         if !crate::row_label::name_fits(&row.title, &shown) {
             continue;
         }
-        seen.extend(kept.iter().map(|it| it.id));
+        seen.extend(kept.iter().take(if first_screen_only { FIRST_SCREEN } else { usize::MAX }).map(|it| it.id));
         let items: Vec<Value> = kept.iter().enumerate().map(|(n, it)| item_json(it, chart.then_some(n + 1), profiles, fresh, today)).collect();
         out.push(row_json(&row, i, items));
     }

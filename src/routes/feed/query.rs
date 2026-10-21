@@ -36,6 +36,8 @@ pub struct FeedQuery {
     pub saved: Option<String>,
     pub recent: Option<String>,
     pub liked: Option<String>,
+    /// Every title of every row in the page (checks and scorecards); the page otherwise carries the first ROW_PAGE titles of a row
+    pub full_rows: Option<u8>,
 }
 
 /// The request after the rules of the endpoint are applied: who asks, for which page, how many rows.
@@ -55,6 +57,8 @@ pub struct FeedRequest {
     pub offset: usize,
     /// The client's local time is between 22:00 and 04:59
     pub late_night: bool,
+    /// Every title of every row (checks); the page otherwise carries the first ROW_PAGE titles of a row
+    pub full_rows: bool,
     pub signals: Signals,
 }
 
@@ -81,6 +85,7 @@ impl FeedRequest {
             per_page,
             offset,
             late_night: q.hour.is_some_and(|h| h >= 22 || h <= 4),
+            full_rows: q.full_rows.is_some_and(|v| v == 1),
             signals: Signals::parse(q.saved.as_deref(), q.recent.as_deref(), q.liked.as_deref()),
         }
     }
@@ -149,7 +154,7 @@ mod tests {
     }
 
     fn query() -> FeedQuery {
-        FeedQuery { rating: None, surface: None, taste: None, affinity: None, genre: None, collection: None, language: None, session_id: None, rows: None, limit: None, offset: None, hour: None,
+        FeedQuery { rating: None, surface: None, taste: None, affinity: None, genre: None, collection: None, language: None, session_id: None, rows: None, limit: None, offset: None, hour: None, full_rows: None,
             saved: None, recent: None, liked: None }
     }
 
@@ -176,7 +181,7 @@ mod tests {
     #[test]
     fn paging_and_collection_rules_apply_once() {
         let q = FeedQuery { rating: None, surface: Some("series".into()), taste: None, affinity: Some("Drama".into()), genre: Some(" Crime ".into()), collection: Some("bad id!".into()),
-            language: Some("KO".into()), session_id: Some("s1".into()), rows: None, limit: Some(500), offset: Some(500), hour: Some(23), saved: None, recent: None, liked: None };
+            language: Some("KO".into()), session_id: Some("s1".into()), rows: None, limit: Some(500), offset: Some(500), hour: Some(23), saved: None, recent: None, liked: None, full_rows: None };
         let r = FeedRequest::parse(&q, &None);
         assert_eq!((r.surface, r.taste.as_str(), r.genre.as_deref(), r.language.as_deref()), ("tv", "Drama", Some("Crime"), Some("ko")));
         assert_eq!((r.per_page, r.offset, r.late_night), (NETFLIX_ROWS_CAP, NETFLIX_ROWS_CAP, true));

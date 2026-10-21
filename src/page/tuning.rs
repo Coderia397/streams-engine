@@ -63,6 +63,7 @@ pub(crate) const SLOT_NEXT: usize = 9;
 pub(crate) const SLOT_GEMS: usize = 10;
 pub(crate) const SLOT_LOVE: usize = 8;
 pub(crate) const SLOT_FAVOURITES: usize = 13;
+pub(crate) const SLOT_POPULAR: usize = 16;
 /// A genre page built from groups: the (level, id) of each cluster and the item indices kept
 pub(crate) type GroupMode = (Vec<(u8, i32)>, Vec<usize>);
 /// The titles of one group, by group id

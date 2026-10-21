@@ -7,10 +7,15 @@ mod policy;
 mod query;
 mod removed;
 mod render;
+mod row;
 mod session;
 
 pub use policy::{genre_row_cap, language_row_cap, MIN_GENRE_PAGE_ROWS};
 pub use query::FeedQuery;
+pub use row::feed_row;
+
+/// Titles of a row the feed sends with the page; the rest come from `/api/feed/row` as the viewer pages the row (composed rows go to 150 titles, note 101).
+pub const ROW_PAGE: usize = 24;
 
 use crate::app::AppState;
 use crate::identity::MaybeCaller;
@@ -36,10 +41,16 @@ pub async fn feed(
     // Session memory: fall back to the session's learned taste when the client sends none, and drop titles the session has already started.
     let session = SessionView::of(&state, req.session_id.as_deref());
     let slot = cache::slot();
-    let key = cache::page_key(&req, &session, slot);
+    // the page text differs with full_rows, the rows behind it do not (row_cache keeps the page key)
+    let key = format!("{}{}", cache::page_key(&req, &session, slot), if req.full_rows { "|full" } else { "" });
     // A page is built once per key: callers that ask for it while it is being built wait for that build, and a cached page goes out as the text it was stored as.
     let body = state.feed_cache.get_with(key, build_page_body(&state, &req, &session, slot)).await;
     ([(header::CONTENT_TYPE, "application/json")], body)
+}
+
+/// Whether the caller asked for every title of every row (`full_rows=1`).
+fn params_full_rows(req: &FeedRequest) -> bool {
+    req.full_rows
 }
 
 /// The response of one page as JSON text.
@@ -86,9 +97,13 @@ async fn build_page_body(state: &AppState, req: &FeedRequest, session: &SessionV
         None => (ctx.build_page().await, None),
     };
     let page_rows = removed::without_removed(page_rows, &state.config.db_path);
-    let all_rows = render::to_client_rows(page_rows, &session.seen, &state.profiles, &fresh, &catalog);
+    let all_rows = render::to_client_rows(page_rows, &session.seen, &state.profiles, &fresh, &catalog, ctx.composed_rows());
     let has_more = all_rows.len() > req.offset + req.per_page && req.offset + req.per_page < plan.cap;
-    let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(req.offset).take(req.per_page).collect();
+    // the full rows are kept for paging inside a row; the page carries the first ROW_PAGE titles of each
+    let key = cache::page_key(req, session, slot);
+    state.row_cache.insert(key, Arc::new(all_rows.clone())).await;
+    let full = params_full_rows(req);
+    let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(req.offset).take(req.per_page).map(|r| if full { row::with_total(r) } else { row::first_page(r) }).collect();
     let response = json!({
         "surface":     req.surface,
         "genre":       req.genre,

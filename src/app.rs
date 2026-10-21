@@ -36,6 +36,8 @@ pub struct AppState {
     /// Directors and top billed cast to their titles, for searching by person
     pub people:     Arc<crate::people::PeopleIndex>,
     pub feed_cache: Cache<String, String>,
+    /// The full rows of a page (every title of every row) under the same key as `feed_cache`: the feed sends the first titles of each row, `/api/feed/row` the rest
+    pub row_cache: Cache<String, Arc<Vec<serde_json::Value>>>,
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
     pub sessions:   crate::sessions::SessionStore,
@@ -145,6 +147,11 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         .max_capacity(1024)
         .time_to_live(Duration::from_secs(30))
         .build();
+    // the full rows live longer than the page text, so paging inside a row keeps working while a viewer scrolls
+    let row_cache: Cache<String, Arc<Vec<serde_json::Value>>> = Cache::builder()
+        .max_capacity(512)
+        .time_to_live(Duration::from_secs(600))
+        .build();
 
     info!(
         "AppState ready — engine mode: {}",
@@ -181,6 +188,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         fresh,
         people,
         feed_cache,
+        row_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),
         requests,

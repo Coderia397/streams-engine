@@ -37,6 +37,7 @@ impl<'a> PageContext<'a> {
                 "gems" => slotted.push((SLOT_GEMS, r)),
                 "love_these" => slotted.push((SLOT_LOVE, r)),
                 "favourites" => slotted.push((SLOT_FAVOURITES, r)),
+                "popular" => slotted.push((SLOT_POPULAR, r)),
                 "byw" | "more_like" => { slotted.push((SLOT_ABOUT[byw_n.min(SLOT_ABOUT.len() - 1)], r)); byw_n += 1; }
                 "collection" => { slotted.push((SLOT_COLLECTION[coll_n.min(SLOT_COLLECTION.len() - 1)], r)); coll_n += 1; }
                 _ => plain.push(r),
@@ -53,7 +54,7 @@ impl<'a> PageContext<'a> {
             let width = match archetype {
                 "continue" | "list" => 0,
                 "top_picks" => 2,
-                "trending" | "new" => 6,
+                "trending" | "new" | "popular" => 6,
                 "collection" => 9,
                 _ => 8,
             };

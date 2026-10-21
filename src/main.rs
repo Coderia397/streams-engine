@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/api/feed",            get(routes::feed::feed))
+        .route("/api/feed/row",        get(routes::feed::feed_row))
         .route("/api/hero-feed",       get(routes::hero::hero_feed))
         .route("/api/search",          get(routes::search::search))
         .route("/api/search-suggestions", get(routes::suggestions::suggestions))

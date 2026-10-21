@@ -53,7 +53,7 @@ pub(crate) fn is_plain_genre_title(title: &str) -> bool {
 pub(crate) fn entry_names_other_kind(title: &str, surface: &str) -> bool {
     let t = title.to_lowercase();
     let films = t.split(' ').any(|w| matches!(w, "film" | "films" | "movie" | "movies" | "cinema"));
-    let series = t.split(' ').any(|w| matches!(w, "series" | "show" | "shows" | "sitcom" | "sitcoms" | "episodes"));
+    let series = t.split(' ').any(|w| matches!(w, "series" | "show" | "shows" | "sitcom" | "sitcoms" | "episodes" | "tv" | "(tv)" | "docuseries" | "miniseries"));
     (surface == "tv" && films) || (surface == "movie" && series)
 }
 

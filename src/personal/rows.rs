@@ -6,6 +6,9 @@ const GEM_MIN_RATING: f32 = 7.4;
 const GEM_MAX_POPULARITY: f32 = 30.0;
 
 /// A title is a gem when it is rated well by enough people but few have found it yet.
+/// Titles in the Everyone's Watching row.
+const POPULAR_ROW: usize = 60;
+
 pub fn is_gem(item: &CatalogItem) -> bool {
     item.vote_average >= GEM_MIN_RATING && item.popularity < GEM_MAX_POPULARITY && item.vote_count >= 150
 }
@@ -214,6 +217,24 @@ impl<'a> PageContext<'a> {
             rows.push(r);
         }
         rows
+    }
+
+    /// Everyone's Watching: the most popular titles this page may show after its Top 10, up to POPULAR_ROW titles (Netflix's row holds about 80).
+    pub(crate) fn build_popular_row(&self, taken: &HashSet<u32>) -> Option<Row> {
+        let items: Vec<&CatalogItem> = self
+            .catalog
+            .chart_keys
+            .iter()
+            .filter_map(|k| self.catalog.get(k))
+            .filter(|i| !taken.contains(&i.id) && self.matches_filters(i) && i.has_poster() && i.has_overview() && !self.fresh.is_upcoming(&i.media_type, i.tmdb_id, &self.today_ymd))
+            .skip(crate::page::TOP_N)
+            .take(POPULAR_ROW)
+            .collect();
+        if items.len() < 10 {
+            return None;
+        }
+        let row_items: Vec<crate::page::RowItem> = items.iter().map(|i| crate::page::RowItem::from_catalog(i)).collect();
+        Some(Row { title: "Everyone's Watching".to_string(), archetype: "popular".to_string(), kind: "popular".to_string(), items: row_items, meta: meta("row.everyones_watching", json!({}), None) })
     }
 
     /// Titles that came out in the last weeks (the real release dates of fresh.json), best known first; None when fewer than six.
