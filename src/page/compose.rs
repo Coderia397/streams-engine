@@ -8,7 +8,7 @@ use super::*;
 /// A page made from requests needs this many request rows, else it is built the older way.
 const REQUEST_PAGE_MIN_ROWS: usize = 8;
 /// A page of composed rows needs this many; below it the page is built the older way.
-const COMPOSED_PAGE_MIN_ROWS: usize = 3;
+const COMPOSED_PAGE_MIN_ROWS: usize = 1;   // Netflix's Dinosaurs page has 2 rows: a thin page shows what it has
 
 /// The ids of the titles already in a row of the page.
 fn taken_ids(rows: &[Row]) -> HashSet<u32> {

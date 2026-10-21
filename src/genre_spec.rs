@@ -44,8 +44,33 @@ pub enum GenreSpec {
     Teen,
     /// Hollywood films (US, widely rated) and US series
     Us,
+    /// A page of the Kids menus (genre_pages::KIDS_*): the rule is read from `kids_rule` by the page's lower case name
+    Kids(&'static str),
     /// Not in the table: exact TMDB genre name, case insensitive (the earlier behaviour)
     Name(String),
+}
+
+/// The rules of the Kids pages that have no genre of their own: (page name, any of these keywords, any of these genres). Netflix's own per title tags count as keywords
+/// (`nf:<tag>`, note 102). A children's profile's age limit keeps every page to children's titles; the rule says what the page is about.
+const KIDS_RULES: &[(&str, &[&str], &[&str])] = &[
+    ("animal time", &["animal", "animals", "talking animal", "anthropomorphic animal", "dog", "cat", "horse", "pets", "wildlife", "nf:animals", "nf:animal tales", "zoo", "farm"], &[]),
+    ("animals", &["animal", "animals", "talking animal", "anthropomorphic animal", "dog", "cat", "horse", "pets", "wildlife", "nf:animals", "nf:animal tales", "zoo", "farm"], &[]),
+    ("cars, trucks & trains", &["car", "cars", "truck", "trucks", "train", "trains", "racing", "race car", "monster truck", "vehicle", "vehicles", "construction vehicle", "nf:cars & trucks"], &[]),
+    ("dinosaurs", &["dinosaur", "dinosaurs", "prehistoric", "nf:dinosaurs"], &[]),
+    ("feel-good", &["nf:feel-good", "nf:heartfelt", "nf:charming", "nf:fun", "feelgood", "feel-good", "heartwarming", "cheerful", "lighthearted"], &[]),
+    ("for little ones", &["preschool", "pre-school", "toddler", "nursery", "educational", "nf:preschool", "nf:educational", "learning", "alphabet", "counting"], &[]),
+    ("friends", &["friendship", "friends", "best friends", "buddies", "nf:friendship", "nf:besties", "friendship group"], &[]),
+    ("funny", &["nf:goofy", "nf:witty", "nf:fun", "nf:irreverent", "nf:absurd", "slapstick comedy", "silly"], &["Comedy"]),
+    ("girls take the lead", &["female protagonist", "girl", "girls", "heroine", "strong female lead", "girl power", "nf:girl power", "nf:female protagonist", "princess", "sisters"], &[]),
+    ("science & arts", &["science", "educational", "art", "arts", "crafts", "mathematics", "stem", "experiment", "inventions", "music education", "nf:educational", "nf:science"], &[]),
+    ("singing & dancing", &["musical", "singing", "song", "songs", "dance", "dancing", "sing-along", "nf:musical", "nf:music"], &["Music"]),
+    ("spooky stuff", &["halloween", "ghost", "ghosts", "monster", "monsters", "witch", "spooky", "haunted house", "haunting", "vampire", "nf:spooky", "nf:halloween"], &[]),
+    ("cool special effects", &["superhero", "robot", "giant robot", "giant monster", "visual effects", "space", "spaceship", "alien", "superpower", "nf:superhero"], &["Science Fiction", "Sci-Fi & Fantasy"]),
+    ("princess tales", &["princess", "prince", "fairy tale", "fairytale", "royalty", "nf:princess", "nf:fairy tale"], &[]),
+];
+
+fn kids_rule(name: &str) -> Option<&'static (&'static str, &'static [&'static str], &'static [&'static str])> {
+    KIDS_RULES.iter().find(|(n, _, _)| *n == name)
 }
 
 const EUROPE: &[&str] = &[
@@ -112,6 +137,9 @@ impl GenreSpec {
             Unsupported => false,
             Awards(family) => it.keywords.iter().any(|k| k.strip_prefix("award:").is_some_and(|r| r.split(':').next() == Some(*family))),
             Tmdb(names) => has_genre(it, names),
+            // For Little Kids (ages about 5 to 8): U rated animation or family titles that are not preschool ones (those are For Little Ones)
+            Kids("little kids") => it.cert == 1 && has_genre(it, &["Animation", "Family", "Kids"]) && !kids_rule("for little ones").is_some_and(|(_, kws, _)| kw_is(it, kws)),
+            Kids(name) => kids_rule(name).is_some_and(|(_, kws, genres)| kw_is(it, kws) || (!genres.is_empty() && has_genre(it, genres))),
             Thriller => has_genre(it, &["Thriller"]) || (it.media_type == "tv" && has_genre(it, &["Mystery"])),
             Anime => it.is_anime,
             BlackStories => kw_is(
@@ -228,6 +256,24 @@ fn by_name(key: &str) -> Option<GenreSpec> {
         "tv movie" => Tmdb(&["TV Movie"]),
         "war" | "war & politics" => Tmdb(&["War", "War & Politics"]),
         "western" => Western,
+        "animated" => Tmdb(&["Animation"]),
+        "watch with the family" => Tmdb(&["Family", "Kids"]),
+        // the Kids menus' own pages
+        "animal time" => Kids("animal time"),
+        "animals" => Kids("animals"),
+        "cars, trucks & trains" | "cars trucks & trains" => Kids("cars, trucks & trains"),
+        "dinosaurs" => Kids("dinosaurs"),
+        "feel-good" | "feel good" => Kids("feel-good"),
+        "for little ones" => Kids("for little ones"),
+        "for little kids" | "little kids" => Kids("little kids"),
+        "friends" => Kids("friends"),
+        "funny" => Kids("funny"),
+        "girls take the lead" => Kids("girls take the lead"),
+        "science & arts" => Kids("science & arts"),
+        "singing & dancing" => Kids("singing & dancing"),
+        "spooky stuff" => Kids("spooky stuff"),
+        "cool special effects" => Kids("cool special effects"),
+        "princess tales" => Kids("princess tales"),
         _ => return None,
     })
 }

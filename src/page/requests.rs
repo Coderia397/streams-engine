@@ -35,6 +35,8 @@ const HARSH_MOODS: &[&str] = &["Violent", "Raunchy", "Gory", "Steamy", "Scandalo
 const KID_GENRES: &[&str] = &["Animation", "Family", "Adventure", "Comedy", "Fantasy", "Kids", "Science Fiction", "Music", "Action", "Documentary", "Reality", "Mystery"];
 /// On a genre page a composed row needs this share of its titles inside the page, unless its own rules name the page's genre.
 const GENRE_PAGE_MIN_SHARE: f32 = 0.15;
+/// Or this many of its first REQUEST_LOOK titles inside the page.
+const GENRE_PAGE_MIN_FIT: usize = 25;
 /// Rows a composed page holds at most (Netflix's Home, Series and Films: 47 to 48 rows).
 const COMPOSED_ROWS_CAP: usize = 40;   // plus the personal and chart rows the page adds, about 48 in all
 
@@ -116,13 +118,13 @@ impl<'a> PageContext<'a> {
 
     /// The share of a request's titles this page may show (its first members, best quality first): a row belongs on a genre page when much of it fits the page,
     /// not when a dozen of its titles happen to pass the page's filter.
-    fn page_share(&self, r: &Request) -> f32 {
+    fn page_fit(&self, r: &Request) -> (f32, usize) {
         let head = &r.members[..r.members.len().min(REQUEST_LOOK)];
         if head.is_empty() {
-            return 0.0;
+            return (0.0, 0);
         }
         let fit = head.iter().filter_map(|k| self.catalog.get(k)).filter(|i| self.page_pool_member(i)).count();
-        fit as f32 / head.len() as f32
+        (fit as f32 / head.len() as f32, fit)
     }
 
     /// How much this page wants a request: its kind, the profile's taste when there is one, its size, and the session's rotation (stable inside a session and a slot).
@@ -185,8 +187,10 @@ impl<'a> PageContext<'a> {
             .filter_map(|r| {
                 let mut score = self.request_score(r, taste.as_deref());
                 if genre_page {
-                    let share = self.page_share(r);
-                    if share < GENRE_PAGE_MIN_SHARE && !names_genre(r) {
+                    // a row belongs on a genre page when a share of it fits the page, or enough of its titles do (a mood row on the Documentaries page: the genre is
+                    // 6% of the catalog, so the share is small, but 25 gritty documentaries make a true "Gritty Films" row there), or its rules name the genre
+                    let (share, fit) = self.page_fit(r);
+                    if share < GENRE_PAGE_MIN_SHARE && fit < GENRE_PAGE_MIN_FIT && !names_genre(r) {
                         return None;
                     }
                     score += 0.8 * share + if names_genre(r) { 0.4 } else { 0.0 };
@@ -226,7 +230,7 @@ impl<'a> PageContext<'a> {
                 continue;
             }
             // rows of one genre page all lean the genre's way, so two of them may sit closer than two rows of Home
-            let max_sim = if genre_page { REQUEST_MAX_ANCHOR_SIM_GENRE } else { REQUEST_MAX_ANCHOR_SIM };
+            let max_sim = if self.genre_spec.is_some() { REQUEST_MAX_ANCHOR_SIM_GENRE } else { REQUEST_MAX_ANCHOR_SIM };
             if placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim) || !names.insert(req.def.name.to_lowercase()) {
                 continue;
             }

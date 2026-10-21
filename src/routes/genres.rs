@@ -53,16 +53,25 @@ pub async fn genre_list(
     let maturity = maturity_of(&caller).or_else(|| q.rating.as_deref().and_then(Maturity::from_rating)).or(Some(Maturity::Adult));
     let surface = if matches!(q.surface.as_deref(), Some("tv") | Some("series")) { "tv" } else { "movie" };
     let catalog = state.catalog.load();
-    let genres: Vec<serde_json::Value> = crate::genre_pages::pages(surface)
+    // a children's profile gets the Kids menus (Netflix's Kids Series and Kids Films lists); the three shared pages mix films and series
+    let kids = maturity.is_some_and(|m| m.is_kids());
+    let list = if kids { crate::genre_pages::kids_pages(surface) } else { crate::genre_pages::pages(surface) };
+    let genres: Vec<serde_json::Value> = list
         .iter()
         .map(|(id, name)| {
-            let spec = crate::genre_spec::resolve(name, surface);
-            let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, surface, &spec, maturity);
-            json!({ "id": id, "name": name, "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS })
+            let page_surface = if kids { crate::genre_pages::kids_page_surface(*id) } else { surface };
+            let spec = crate::genre_spec::resolve(name, page_surface);
+            let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, page_surface, &spec, maturity);
+            json!({ "id": id, "name": name, "surface": page_surface, "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS })
         })
         .collect();
-    let page = if surface == "tv" { crate::genre_pages::SERIES_PAGE_ID } else { crate::genre_pages::FILMS_PAGE_ID };
-    Json(json!({ "surface": surface, "page_id": page, "genres": genres }))
+    let page = match (kids, surface) {
+        (true, "tv") => crate::genre_pages::KIDS_SERIES_PAGE_ID,
+        (true, _) => crate::genre_pages::KIDS_FILMS_PAGE_ID,
+        (false, "tv") => crate::genre_pages::SERIES_PAGE_ID,
+        _ => crate::genre_pages::FILMS_PAGE_ID,
+    };
+    Json(json!({ "surface": surface, "kids": kids, "page_id": page, "genres": genres }))
 }
 
 /// GET /api/season-chips: the events in season that have a page of their own (a genre page id), for the chips of the mobile top bar (Halloween in the weeks around it). An event

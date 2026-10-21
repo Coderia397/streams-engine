@@ -60,9 +60,71 @@ pub const TV_PAGES: &[(u32, &str)] = &[
     (10008, "US"),
 ];
 
+/// The Kids profile's own menus (Netflix's Kids Series and Kids Films genre lists, note 97): ids from 20001 (series) and 21001 (films); the three pages both menus
+/// share (For Little Ones, Science & Arts, Science & Nature) carry one id and mix films and series, as on Netflix.
+pub const KIDS_SERIES_PAGE_ID: u32 = 20000;
+pub const KIDS_FILMS_PAGE_ID: u32 = 21000;
+
+pub const KIDS_TV_PAGES: &[(u32, &str)] = &[
+    (20001, "Action"),
+    (20002, "Animal Time"),
+    (20003, "Cars, Trucks & Trains"),
+    (20004, "Dinosaurs"),
+    (20005, "Fantasy"),
+    (20006, "Feel-good"),
+    (22001, "For Little Ones"),
+    (20008, "Friends"),
+    (20009, "Funny"),
+    (20010, "Girls Take the Lead"),
+    (20011, "Reality"),
+    (20012, "Sci-Fi"),
+    (22002, "Science & Arts"),
+    (22003, "Science & Nature"),
+    (20015, "Singing & Dancing"),
+    (20016, "Spooky Stuff"),
+    (20017, "Watch with the Family"),
+];
+
+pub const KIDS_MOVIE_PAGES: &[(u32, &str)] = &[
+    (21001, "Action"),
+    (21002, "Adventure"),
+    (21003, "Animals"),
+    (21004, "Animated"),
+    (21005, "Cool Special Effects"),
+    (21006, "Documentaries"),
+    (21007, "Fantasy"),
+    (21008, "Feel-good"),
+    (22001, "For Little Ones"),
+    (21010, "Friends"),
+    (21011, "Funny"),
+    (21012, "Girls Take the Lead"),
+    (21013, "For Little Kids"),
+    (21014, "Princess Tales"),
+    (21015, "Sci-Fi"),
+    (22002, "Science & Arts"),
+    (22003, "Science & Nature"),
+    (21018, "Singing & Dancing"),
+    (21019, "Spooky Stuff"),
+    (21020, "Watch with the Family"),
+];
+
 /// The genre list of a surface (`movie` or `tv`).
 pub fn pages(surface: &str) -> &'static [(u32, &'static str)] {
     if surface == "tv" { TV_PAGES } else { MOVIE_PAGES }
+}
+
+/// The genre list of a surface for a children's profile.
+pub fn kids_pages(surface: &str) -> &'static [(u32, &'static str)] {
+    if surface == "tv" { KIDS_TV_PAGES } else { KIDS_MOVIE_PAGES }
+}
+
+/// The surface a Kids page id belongs to: "both" for the pages both menus share.
+pub fn kids_page_surface(id: u32) -> &'static str {
+    match id {
+        22001..=22999 => "both",
+        20001..=20999 => "tv",
+        _ => "movie",
+    }
 }
 
 #[cfg(test)]
@@ -73,7 +135,7 @@ mod tests {
     fn every_page_name_resolves_to_a_rule_and_ids_are_unique_per_surface() {
         for surface in ["movie", "tv"] {
             let mut ids = crate::det::HashSet::default();
-            for (id, name) in pages(surface) {
+            for (id, name) in pages(surface).iter().chain(kids_pages(surface)) {
                 assert!(ids.insert(*id), "{surface}: id {id} twice");
                 assert!(crate::genre_spec::resolve(name, surface) != crate::genre_spec::GenreSpec::Unsupported || *name == "Astrology", "{surface}: {name} has no rule");
             }
