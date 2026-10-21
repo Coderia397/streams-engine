@@ -37,6 +37,8 @@ pub struct CatalogItem {
     pub cert_us: u8,
     /// Minutes: movie runtime or median episode runtime, 0 when unknown
     pub runtime: u32,
+    /// The networks a series ran on (TMDB), empty for films and unknown series
+    pub networks: Vec<String>,
     /// Bit flags computed once at load (see FLAG_*), so page builders never scan titles or keywords per request
     pub flags: u8,
 }

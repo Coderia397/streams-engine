@@ -5,7 +5,7 @@ fn item(rating: f32, popularity: f32, votes: u32) -> CatalogItem {
         id: 1, tmdb_id: 1, media_type: "movie".into(), title: "t".into(), release_year: Some(2000), genres: vec![],
         overview: String::new(), tagline: None, director: None, poster_path: Some("/p.jpg".into()), backdrop_path: Some("/b.jpg".into()),
         vote_average: rating, popularity, is_anime: false, vote_count: votes, adult: false,
-        original_language: "en".into(), tv_type: None, countries: vec![], keywords: vec![], runtime: 0, flags: 0, cert: 0, cert_gb: 0, cert_us: 0,
+        original_language: "en".into(), tv_type: None, countries: vec![], keywords: vec![], runtime: 0, networks: vec![], flags: 0, cert: 0, cert_gb: 0, cert_us: 0,
     }
 }
 

@@ -45,6 +45,17 @@ pub struct Rules {
     /// keyword, a Thriller series may be a Mystery), the genre blocks of composed rows
     #[serde(default)]
     pub genre_specs: Vec<String>,
+    /// One of these US certificates (TV-Y, TV-Y7, TV-G, TV-PG, TV-14, TV-MA, G, PG, PG-13, R): the audience tier of a cartoon (note 103)
+    #[serde(default)]
+    pub us_ratings_any: Vec<String>,
+    /// One of these networks (the channel a series ran on)
+    #[serde(default)]
+    pub networks_any: Vec<String>,
+    /// None of these keywords
+    #[serde(default)]
+    pub keywords_none: Vec<String>,
+    /// Shortest runtime in minutes; a title without a known runtime does not pass
+    pub runtime_min: Option<u32>,
 }
 
 impl Rules {
@@ -74,6 +85,9 @@ impl Rules {
         if self.runtime_max.is_some_and(|m| it.runtime == 0 || it.runtime > m) {
             return false;
         }
+        if self.runtime_min.is_some_and(|m| it.runtime < m) {
+            return false;
+        }
         if !self.languages_none.is_empty() && self.languages_none.contains(&it.original_language) {
             return false;
         }
@@ -87,6 +101,15 @@ impl Rules {
             return false;
         }
         if !self.keyword_groups.iter().all(|group| it.keywords.iter().any(|k| group.contains(k))) {
+            return false;
+        }
+        if !self.keywords_none.is_empty() && it.keywords.iter().any(|k| self.keywords_none.contains(k)) {
+            return false;
+        }
+        if !self.us_ratings_any.is_empty() && !self.us_ratings_any.iter().any(|r| crate::catalog::us_label(it.cert_us) == Some(r.as_str())) {
+            return false;
+        }
+        if !self.networks_any.is_empty() && !it.networks.iter().any(|n| self.networks_any.contains(n)) {
             return false;
         }
         if !self.keywords_any.is_empty() && !it.keywords.iter().any(|k| self.keywords_any.contains(k)) {

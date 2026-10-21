@@ -25,6 +25,7 @@ impl<'a> PageContext<'a> {
     /// A title of the profile's own lists (saved, recent): any surface rule and age rule of the page, but not the audience rule (a parent's list may hold children's titles).
     pub(crate) fn personal_ok(&self, item: &CatalogItem) -> bool {
         !item.adult
+            && (self.is_kids() || !self.childrens_title(item))
             && (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.genre_spec.is_none_or(|g| g.matches(item))
             && self.maturity.is_none_or(|m| self.maturity_allows(m, item))
@@ -68,7 +69,7 @@ impl<'a> PageContext<'a> {
         let mut cands: Vec<(f32, &CatalogItem)> = self
             .eligible(keys, taken, false)
             .into_iter()
-            .filter(|i| !gems_only || is_gem(i))
+            .filter(|i| (self.is_kids() || !self.childrens_title(i)) && (!gems_only || is_gem(i)))
             .take(400)
             .filter_map(|i| {
                 let v = self.vector_of(i.id)?;
@@ -84,7 +85,7 @@ impl<'a> PageContext<'a> {
         let mut cands: Vec<(f32, &CatalogItem)> = self
             .eligible(keys, taken, false)
             .into_iter()
-            .filter(|i| !gems_only || is_gem(i))
+            .filter(|i| (self.is_kids() || !self.childrens_title(i)) && (!gems_only || is_gem(i)))
             // up to 150 films and 150 series (series have larger popularity numbers and would fill the first 300 alone)
             .scan((0usize, 0usize), |n, i| {
                 let slot = if i.media_type == "tv" { &mut n.1 } else { &mut n.0 };
@@ -236,6 +237,7 @@ impl<'a> PageContext<'a> {
             .iter()
             .filter_map(|k| self.catalog.get(k))
             .filter(|i| !taken.contains(&i.id) && self.matches_filters(i) && i.has_poster() && i.has_overview() && !self.fresh.is_upcoming(&i.media_type, i.tmdb_id, &self.today_ymd))
+            .filter(|i| self.is_kids() || !self.childrens_title(i))
             .skip(crate::page::TOP_N)
             .take(POPULAR_ROW)
             .collect();

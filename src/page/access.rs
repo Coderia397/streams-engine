@@ -165,6 +165,12 @@ impl<'a> PageContext<'a> {
             && (!safety_nets() || self.allowed_by_nets(item))
     }
 
+    /// A title made for children (TMDB Kids genre, or a US TV-Y or TV-Y7 rating): on a page that is not a child's it stays out of the personal rows, the popular row and
+    /// the composed rows that are not about children or animation (Miraculous next to Breaking Bad in Top Picks, iCarly next to The Boys in US Series).
+    pub(crate) fn childrens_title(&self, item: &CatalogItem) -> bool {
+        item.genres.iter().any(|g| g == "Kids") || matches!(item.cert_us, 6 | 7)
+    }
+
     /// The quality gate of this page (see `member_quality_for`).
     pub(crate) fn member_ok(&self, item: &CatalogItem) -> bool {
         member_quality_for(self.genre_spec, item)

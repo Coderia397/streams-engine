@@ -61,6 +61,7 @@ pub(crate) fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<CatalogItem> 
         countries:     json_list(row.get::<_, Option<String>>(17).unwrap_or(None), false),
         keywords,
         runtime:       row.get::<_, Option<i64>>(19).unwrap_or(None).unwrap_or(0).max(0) as u32,
+        networks:      json_list(row.get::<_, Option<String>>(21).unwrap_or(None), false),
         cert:          cert_rank(certs.as_deref()),
         cert_gb:       gb,
         cert_us:       us,
@@ -82,7 +83,7 @@ pub(crate) fn catalog_sql(conn: &Connection) -> Result<(String, &'static str)> {
         "SELECT {id_col}, media_type, title, release_year, genres,
                 overview, poster_path, backdrop_path,
                 vote_average, popularity, is_anime, tagline, director,
-                {vc}, {ad}, {ol}, {tt}, {oc}, {kw}, {rt}, {ce}
+                {vc}, {ad}, {ol}, {tt}, {oc}, {kw}, {rt}, {ce}, {nw}
          FROM catalog",
         vc = opt("vote_count", "0"),
         ad = opt("adult", "0"),
@@ -92,6 +93,7 @@ pub(crate) fn catalog_sql(conn: &Connection) -> Result<(String, &'static str)> {
         kw = opt("keywords", "NULL"),
         rt = opt("runtime", "0"),
         ce = opt("certs", "NULL"),
+        nw = opt("networks", "NULL"),
     );
     Ok((sql, id_col))
 }

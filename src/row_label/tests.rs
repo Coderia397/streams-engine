@@ -8,7 +8,7 @@ fn item(genres: &[&str], countries: &[&str], keywords: &[&str], year: i32) -> Ca
         poster_path: None, backdrop_path: None, vote_average: 7.0, popularity: 10.0, is_anime: false, vote_count: 0,
         adult: false, original_language: match countries.first() { Some(&"JP") => "ja", Some(&"FR") => "fr", Some(&"ES") => "es", Some(&"KR") => "ko", _ => "en" }.into(), tv_type: None,
         countries: countries.iter().map(|s| s.to_string()).collect(),
-        keywords: keywords.iter().map(|s| s.to_string()).collect(), runtime: 0, flags: 0, cert: 0, cert_gb: 0, cert_us: 0,
+        keywords: keywords.iter().map(|s| s.to_string()).collect(), runtime: 0, networks: vec![], flags: 0, cert: 0, cert_gb: 0, cert_us: 0,
     }
 }
 

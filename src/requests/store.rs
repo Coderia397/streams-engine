@@ -33,6 +33,15 @@ pub struct RequestDef {
     pub profile: Option<String>,
     pub netflix_name: Option<String>,
     pub template: Option<String>,
+    /// The blocks the row is composed of (bucket and token), for page rules that look at what a row is about
+    #[serde(default)]
+    pub blocks: Vec<BlockRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockRef {
+    pub bucket: String,
+    pub token: String,
 }
 
 #[derive(Deserialize)]

@@ -34,6 +34,14 @@ const ANIMATION_SHARE: f32 = 0.25;
 /// Moods Netflix keeps below the fold.
 const HARSH_MOODS: &[&str] = &["Violent", "Raunchy", "Gory", "Steamy", "Scandalous", "Scary", "Ominous", "Chilling"];
 
+/// Subjects a row may be named for on a child's page (a token of a subject block, matched as a word part).
+const KID_SUBJECTS: &[&str] = &["friend", "animal", "dinosaur", "space", "time travel", "superhero", "magic", "princess", "school", "sport", "music", "dance", "robot", "pirate",
+    "dragon", "monster", "adventure", "family", "holiday", "christmas", "halloween", "witch", "alien", "road trip", "teen", "high school", "fairy", "toy", "pet", "dog", "cat",
+    "horse", "ocean", "sea", "underwater", "jungle", "farm", "train", "car", "truck", "science", "nature", "wildlife", "circus", "camp", "summer", "winter", "snow", "ballet",
+    "singing", "band", "unicorn", "mermaid", "knight", "ninja", "martial arts", "slapstick", "prank", "mystery", "detective", "treasure", "explorer", "new york", "london", "paris",
+    "tokyo", "coming-of-age", "coming of age", "sibling", "grandparent", "baby", "little", "puppy", "kitten", "bunny", "bear", "penguin", "shark", "dolphin", "whale", "zoo",
+    "video game", "cartoon", "comic", "lego", "doll", "superpower", "wizard", "giant", "monster truck", "spy", "secret agent", "talking animal", "girl power", "feel-good"];
+
 /// Moods a row may be named for on a child's page.
 const KID_MOODS: &[&str] = &["Feel-Good", "Heartfelt", "Goofy", "Quirky", "Imaginative", "Charming", "Exciting", "Inspiring", "Fun", "Cute", "Whimsical", "Magical", "Humorous", "Relaxing", "Witty", "Epic"];
 
@@ -116,7 +124,9 @@ impl<'a> PageContext<'a> {
                 let tpl = r.def.template.as_deref().unwrap_or("");
                 let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject}" | "{event} {format}" | "{event} {genre} {format}" | "{event}");
                 let mood = matches!(tpl, "{mood} {format}" | "{mood} {genre} {format}" | "{mood} {genre}") && KID_MOODS.iter().any(|m| r.def.name.starts_with(m));
-                (plain || mood) && r.def.rules.genre_specs.iter().all(|g| KID_GENRES.contains(&g.as_str()))
+                // a subject row reaches a child's page only for subjects children's rows are about ("Revenge Films" with Zootopia in it is not a children's row)
+                let subject_ok = r.def.blocks.iter().filter(|b| b.bucket == "subject").all(|b| KID_SUBJECTS.iter().any(|k| b.token.contains(k)));
+                (plain || mood) && subject_ok && r.def.rules.genre_specs.iter().all(|g| KID_GENRES.contains(&g.as_str()))
             }
             _ => true,
         };
@@ -262,11 +272,17 @@ impl<'a> PageContext<'a> {
         let depth = if req.free { MAX_ROW_DEPTH } else { ROW_SIZE };
         let min_items = if req.free && self.genre_spec.is_some() { FIRST_SCREEN } else { REQUEST_MIN_ITEMS };
         let look = if req.free { REQUEST_LOOK.max(depth * 3) } else { REQUEST_LOOK };
+        // a row that is not about children, families or animation carries no children's titles on a page that is not a child's
+        let about_children = req.def.blocks.iter().any(|b| b.bucket == "tier")
+            || req.def.rules.genre_specs.iter().any(|g| matches!(g.as_str(), "Family" | "Kids" | "Animation"))
+            || req.def.profile.as_deref().is_some_and(|p| p == "kids" || p == "both")
+            || { let n = req.def.name.to_lowercase(); n.contains("kids") || n.contains("family") || n.contains("cartoon") || n.contains("animat") || n.contains("little") };
+        let keep_children = self.is_kids() || !req.free || about_children;
         let eligible: Vec<&CatalogItem> = req
             .members
             .iter()
             .filter_map(|k| self.catalog.get(k))
-            .filter(|i| !taken.contains(&i.id) && self.page_pool_member(i))
+            .filter(|i| !taken.contains(&i.id) && self.page_pool_member(i) && (keep_children || !self.childrens_title(i)))
             .take(look)
             .collect();
         if eligible.len() < min_items {
