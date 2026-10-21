@@ -24,6 +24,7 @@ pub mod quality;
 pub mod routes;
 pub mod signals;
 pub mod sessions;
+pub mod status;
 pub mod support;
 pub mod taxonomy;
 pub mod titles;

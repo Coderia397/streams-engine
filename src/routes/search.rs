@@ -60,13 +60,15 @@ fn title_matches(index: &TitleIndex, qn: &str, aliases: &[Vec<String>], limit: u
     hits.into_iter().take(limit).map(|h| h.1).collect()
 }
 
-/// The groups of words that mean the same in a title (`search_aliases.json` next to the database: `[["dr", "doctor"], ["mr", "mister"]]`), read on every request so the file can be edited live.
-fn load_aliases(db_path: &str) -> Vec<Vec<String>> {
-    std::path::Path::new(db_path).parent()
-        .and_then(|d| std::fs::read_to_string(d.join("search_aliases.json")).ok())
-        .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(&t).ok())
-        .map(|groups| groups.into_iter().map(|g| g.iter().map(|w| normalise(w)).collect()).collect())
-        .unwrap_or_default()
+/// The groups of words that mean the same in a title (`search_aliases.json` next to the database: `[["dr", "doctor"], ["mr", "mister"]]`); the file can be edited while the engine runs.
+static ALIASES: crate::live::LiveFile<Vec<Vec<String>>> = crate::live::LiveFile::new("search_aliases.json", parse_aliases);
+
+fn parse_aliases(text: &str) -> Option<Vec<Vec<String>>> {
+    serde_json::from_str::<Vec<Vec<String>>>(text).ok().map(|groups| groups.into_iter().map(|g| g.iter().map(|w| normalise(w)).collect()).collect())
+}
+
+fn load_aliases(db_path: &str) -> std::sync::Arc<Vec<Vec<String>>> {
+    ALIASES.get(db_path)
 }
 
 /// The query with one word swapped for each other member of its alias group (the last, unfinished word is left alone).

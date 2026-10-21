@@ -2,16 +2,17 @@ use crate::app::AppState;
 use axum::{extract::{Query, State}, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{Arc, OnceLock}};
+use crate::det::HashMap;
+use crate::live::LiveFile;
+use std::sync::Arc;
 
 /// Skip marks per title, as ratios of the video's length (note 71): `skip_marks.jsonl` next to the database, one line per show:
-/// `{"k":"tv:1396","typical":{"intro":[0.05,0.07],"recap":null,"credits":0.97},"premiere":{...},"finale":{...}}`. Read once, on the first request.
-static MARKS: OnceLock<HashMap<String, Value>> = OnceLock::new();
+/// `{"k":"tv:1396","typical":{"intro":[0.05,0.07],"recap":null,"credits":0.97},"premiere":{...},"finale":{...}}`. Read again when the file changes.
+static MARKS: LiveFile<HashMap<String, Value>> = LiveFile::new("skip_marks.jsonl", parse_lines);
 
-fn load(db_path: &str) -> HashMap<String, Value> {
-    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::default() };
-    let Ok(text) = std::fs::read_to_string(dir.join("skip_marks.jsonl")) else { return HashMap::default() };
-    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect()
+/// One entry per line, keyed by its `k`.
+fn parse_lines(text: &str) -> Option<HashMap<String, Value>> {
+    Some(text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect())
 }
 
 /// The marks of one video: the first episode of a season takes `premiere`, the last `finale`, every other one `typical` (each falls back to `typical`); a film or an unknown title has none.
@@ -39,20 +40,14 @@ pub struct MarksQuery {
 
 /// GET /api/skip-marks?type=tv&id=1396&episode=3[&last=1]: `{ "intro": [start, end] | null, "recap": [start, end] | null, "credits": start | null }`, all as ratios of the video's length.
 pub async fn skip_marks(State(state): State<Arc<AppState>>, Query(q): Query<MarksQuery>) -> impl IntoResponse {
-    let map = MARKS.get_or_init(|| load(&state.config.db_path));
+    let map: Arc<HashMap<String, Value>> = MARKS.get(&state.config.db_path);
     let key = format!("{}:{}", if q.kind == "tv" || q.kind == "series" { "tv" } else { "movie" }, q.id);
     Json(pick(map.get(&key), q.episode, q.last == Some(1)))
 }
 
 /// Content reasons per title (note 69), from `content_reasons.jsonl` next to the database (made by pipeline/reasons_apply.py): a film `{"k","r"}`, a show `{"k","d","e"}` where `d` is the answer
 /// for every episode without its own summary and `e` holds the episodes whose answer differs (key `season:episode`).
-static REASONS: OnceLock<HashMap<String, Value>> = OnceLock::new();
-
-fn load_reasons(db_path: &str) -> HashMap<String, Value> {
-    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::default() };
-    let Ok(text) = std::fs::read_to_string(dir.join("content_reasons.jsonl")) else { return HashMap::default() };
-    text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect()
-}
+static REASONS: LiveFile<HashMap<String, Value>> = LiveFile::new("content_reasons.jsonl", parse_lines);
 
 /// The reasons of one video, or null when there is no answer for it (an unknown title, or an unreadable call): the page then shows the rating alone.
 pub fn pick_reasons(entry: Option<&Value>, season: Option<u32>, episode: Option<u32>) -> Value {
@@ -73,7 +68,7 @@ pub struct ReasonsQuery {
 
 /// GET /api/content-reasons?type=tv&id=1396&season=1&episode=3: `{ "reasons": ["violence", "strong language"] | null }`, words from the fixed list of 20.
 pub async fn content_reasons(State(state): State<Arc<AppState>>, Query(q): Query<ReasonsQuery>) -> impl IntoResponse {
-    let map = REASONS.get_or_init(|| load_reasons(&state.config.db_path));
+    let map: Arc<HashMap<String, Value>> = REASONS.get(&state.config.db_path);
     let key = format!("{}:{}", if q.kind == "tv" || q.kind == "series" { "tv" } else { "movie" }, q.id);
     Json(json!({ "reasons": pick_reasons(map.get(&key), q.season, q.episode) }))
 }

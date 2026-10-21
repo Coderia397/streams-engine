@@ -80,11 +80,21 @@ pub async fn season_chips(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Json(json!({ "chips": chips }))
 }
 
-/// GET /api/features: switches the clients read to show or hide parts of the product (`{ "games": false }`). The file `features.json` next to the database is read on every
-/// request, so a switch changes at once without a restart; a missing file or switch means off.
+static FEATURES: crate::live::LiveFile<serde_json::Value> = crate::live::LiveFile::new("features.json", parse_object);
+static GAMES: crate::live::LiveFile<serde_json::Value> = crate::live::LiveFile::new("games.json", parse_any);
+
+fn parse_object(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(text).ok().filter(|v| v.is_object())
+}
+
+fn parse_any(text: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(text).ok()
+}
+
+/// GET /api/features: switches the clients read to show or hide parts of the product (`{ "games": false }`). The file `features.json` next to the database is read again when it
+/// changes, so a switch changes at once without a restart; a missing file or switch means off.
 pub async fn features(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let path = std::path::Path::new(&state.config.db_path).parent().map(|d| d.join("features.json"));
-    let flags: serde_json::Value = path.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    let flags = FEATURES.get(&state.config.db_path);
     let mut out = serde_json::Map::new();
     // the flags the page knows of, each off unless the file turns it on
     out.insert("games".to_string(), json!(flags.get("games").and_then(|v| v.as_bool()).unwrap_or(false)));
@@ -94,13 +104,11 @@ pub async fn features(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 /// GET /api/games: the games to show on the New & Hot page and the Games page, `{ "games": [ { "id", "title", "description", "image", "url", "genre" } ] }`, from `games.json` next to the
-/// database (read on every request). Empty while there is no file or Games is switched off in `features.json`.
+/// database (read again when it changes). Empty while there is no file or Games is switched off in `features.json`.
 pub async fn games(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let dir = std::path::Path::new(&state.config.db_path).parent().map(|d| d.to_path_buf());
-    let read = |name: &str| dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(name)).ok()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    let on = read("features.json").and_then(|f| f.get("games").and_then(|g| g.as_bool())).unwrap_or(false);
-    let list = if on { read("games.json").filter(|v| v.is_array()).unwrap_or_else(|| json!([])) } else { json!([]) };
-    Json(json!({ "games": list }))
+    let on = FEATURES.get(&state.config.db_path).get("games").and_then(|g| g.as_bool()).unwrap_or(false);
+    let list = if on { GAMES.get(&state.config.db_path).as_ref().clone() } else { json!([]) };
+    Json(json!({ "games": if list.is_array() { list } else { json!([]) } }))
 }
 
 #[derive(Deserialize)]

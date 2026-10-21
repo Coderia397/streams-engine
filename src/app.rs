@@ -182,6 +182,12 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         identity: crate::identity::Identity::from_env(),
         config,
     });
+    // the catalog and the vectors must describe the same titles; say so when the export of the pipeline was not run after a catalog change
+    let coverage = crate::status::Coverage::of(&state.catalog.load(), &state.vectors);
+    info!("Data: {} catalog titles, {} vectors, {} titles without a vector, {} vectors outside the catalog", coverage.titles, coverage.vectors, coverage.titles_without_vector(), coverage.vectors_outside_catalog());
+    if let Some(advice) = coverage.advice() {
+        tracing::warn!("{advice}");
+    }
     if !state.taxonomy.entries.is_empty() {
         spawn_support(state.clone(), taxonomy_bin);
     }
