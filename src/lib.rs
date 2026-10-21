@@ -11,6 +11,7 @@ pub mod identity;
 pub mod centroid;
 pub mod cluster;
 pub mod hnsw;
+pub mod live;
 pub mod mmr;
 pub mod row_label;
 pub mod people;

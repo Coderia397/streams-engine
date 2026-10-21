@@ -52,3 +52,59 @@ pub struct PageContext<'a> {
     /// What the client sent about the profile: saved, recent and liked titles (personal rows)
     pub signals:     &'a crate::signals::Signals,
 }
+
+/// The part of a page context that comes from the request; the rest is the engine's loaded data (`PageContext::new`).
+pub struct PageAsk<'a> {
+    /// "movie" | "tv" | "both"
+    pub surface:     &'a str,
+    pub genre:       Option<&'a str>,
+    pub genre_spec:  Option<&'a crate::genre_spec::GenreSpec>,
+    pub language:    Option<&'a str>,
+    pub maturity:    Option<crate::identity::Maturity>,
+    pub late_night:  bool,
+    /// Blended taste vector on the unit sphere, zeros for a profile without taste
+    pub taste:       Vec<f32>,
+    pub target_rows: usize,
+    /// Seeds the exploration noise; empty for an anonymous request
+    pub session:     &'a str,
+    pub signals:     &'a crate::signals::Signals,
+}
+
+impl<'a> PageContext<'a> {
+    /// The context of one page: the loaded catalog, vectors, groups and vocabularies of the engine, and what this request asks for.
+    pub fn new(state: &'a crate::app::AppState, catalog: &'a CatalogMap, fresh: &'a crate::fresh::FreshStore, ask: PageAsk<'a>) -> Self {
+        // A Kids profile's home, Films, Series and genre pages come from the Kids row vocabulary when there is one
+        let kids_entries = ask.maturity.is_some_and(|m| m.is_kids()) && ask.language.is_none() && state.taxonomy_kids.entries.len() >= 60;
+        Self {
+            catalog,
+            vectors: &state.vectors,
+            hnsw: &state.hnsw,
+            seeds: &state.seeds,
+            groups: &state.groups,
+            group_names: &state.group_names,
+            vibe: &state.vibe,
+            late_night: ask.late_night,
+            vault: &state.vault,
+            taxonomy: if kids_entries { &state.taxonomy_kids } else { &state.taxonomy },
+            profiles: &state.profiles,
+            topics: &state.topics,
+            fresh,
+            today_ymd: crate::fresh::ymd(crate::fresh::today_days()),
+            language: ask.language,
+            animation: None,
+            kids_entries,
+            surface: ask.surface,
+            genre: ask.genre,
+            genre_spec: ask.genre_spec,
+            taste: ask.taste,
+            target_rows: ask.target_rows,
+            mean: &state.mean,
+            today: crate::taxonomy::today_md(),
+            session: ask.session,
+            maturity: ask.maturity,
+            fill_pool: None,
+            skip: None,
+            signals: ask.signals,
+        }
+    }
+}
