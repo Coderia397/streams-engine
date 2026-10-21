@@ -1,7 +1,39 @@
 //! The page: which kinds of rows are built, in which order, and where they are placed among each other.
+//!
+//! A page is built in layers. The base layer (`build_page_rows_inner`, see clusters.rs and genre.rs) makes the topic rows of the page kind; each layer after it adds a kind
+//! of row to the rows so far and decides for itself whether it applies to this page (a children's page, a language page and a genre page each skip some). To add a
+//! source of rows, write a layer and put one line in `build_page_rows`; to remove one, delete its line.
 use super::*;
 
+/// The ids of the titles already in a row of the page.
+fn taken_ids(rows: &[Row]) -> HashSet<u32> {
+    rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect()
+}
+
+/// The titles of the rows already on the page, lower case.
+fn lower_titles(rows: &[Row]) -> HashSet<String> {
+    rows.iter().map(|r| r.title.to_lowercase()).collect()
+}
+
+/// Inserts extra rows at positions `first`, `first + 3`, `first + 6` ... (or at the end when the page is shorter), keeping the first rows of the page.
+fn interleave(rows: &mut Vec<Row>, extra: Vec<Row>, first: usize) {
+    for (n, r) in extra.into_iter().enumerate() {
+        let at = (first + 3 * n).min(rows.len());
+        rows.insert(at, r);
+    }
+}
+
 impl<'a> PageContext<'a> {
+    /// A children's profile (age limited to children).
+    pub(crate) fn is_kids(&self) -> bool {
+        self.maturity.is_some_and(|m| m.is_kids())
+    }
+
+    /// A page of no genre, no language and no animation split: Home, Films or Series.
+    pub(crate) fn is_plain_page(&self) -> bool {
+        self.genre.is_none() && self.language.is_none() && self.animation.is_none()
+    }
+
     /// The page for this request: rows from the builder for the page kind, then the Top 10 rows are placed by value among
     /// them (see `place_charts`).
     pub async fn build_page(&self) -> Vec<Row> {
@@ -15,86 +47,108 @@ impl<'a> PageContext<'a> {
         rows
     }
 
-    /// The rows of the page: the topic rows, with up to two seasonal rows (from the row vocabulary, only inside their calendar window) placed near the top
-    /// of the home, films and series pages.
+    /// The rows of the page, layer by layer.
     pub(crate) async fn build_page_rows(&self) -> Vec<Row> {
         let mut rows = self.build_page_rows_inner().await;
-        let kids = self.maturity.is_some_and(|m| m.is_kids());
-        if self.genre.is_none() && self.language.is_none() && self.animation.is_none() && !kids && !self.taxonomy.entries.is_empty() {
-            // the collection rows (an event's banner, a mood) are built first so the seasonal rows take what is left
-            let used0: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let collections = self.build_collection_rows(&used0, 4);
-            rows.extend(collections);
-            let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-            // sub groups of the season's pool when they exist, the flat keyword rows otherwise
-            let seasonal = { let sub = self.build_seasonal_sub_rows(&used); if sub.is_empty() { self.build_seasonal_rows(&used).await } else { sub } };
-            for (n, row) in seasonal.into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).enumerate() {
-                let at = (if n == 0 { 2 } else { 5 + n }).min(rows.len());
-                rows.insert(at, row);
-            }
-        }
-        // a children's page gets its banner collections (named ones and the ones in season), placed by slot like the adult banners
-        if kids && self.kids_entries && self.genre.is_none() && self.language.is_none() && self.animation.is_none() {
-            let used0: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let banners = self.build_kids_collection_rows(&used0, 3).await;
-            rows.extend(banners);
-        }
-        // late night moods lead a night page, vibe rows (how the titles feel) are mixed in on every page that is not a children's or a language page
-        if !kids && self.language.is_none() && self.animation.is_none() {
-            let used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let mut extra: Vec<Row> = Vec::new();
-            if self.late_night && self.genre.is_none() { extra.extend(self.build_mood_rows(&used, 2, true)); }
-            let mut taken = used.clone(); extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken.insert(i.id); }));
-            // topic rows that carry only a genre name ("Comedies", "Documentary & Drama") are replaced by rows named for how their titles feel
-            let before = rows.len();
-            if self.genre.is_none() { rows.retain(|r| !(r.kind.is_empty() && r.archetype == "thematic" && is_plain_genre_title(&r.title))); }
-            let removed = before - rows.len();
-            let titles: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-            let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3 + removed.min(8)).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
-            let night = extra.len();
-            let mut taken_all = taken.clone(); vibes.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
-            let attrs: Vec<Row> = self.build_attribute_rows(&taken_all, 2).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
-            rows = self.interleave(rows, extra, 1);
-            rows = self.interleave(rows, vibes, 3 + night);
-            rows = self.interleave(rows, attrs, 5 + night);
-            // topic rows (what the titles are about), a few for each page
-            let on_page: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-            let taken_topics: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let topic_rows = self.build_topic_rows(&taken_topics, if self.genre.is_none() { 4 } else { 3 }, &on_page);
-            rows = self.interleave(rows, topic_rows, 4 + night);
-            // one mood row among the topic rows on a page without a genre
-            if self.genre.is_none() && !self.late_night {
-                let taken_now: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-                let on_page: HashSet<String> = rows.iter().map(|r| r.title.to_lowercase()).collect();
-                let moods: Vec<Row> = self.build_mood_rows(&taken_now, 3, false).into_iter().filter(|r| !on_page.contains(&r.title.to_lowercase())).take(1).collect();
-                rows = self.interleave(rows, moods, 8);
-            }
-        }
-        // personal rows, New Releases and collections: placed by slot in `place_charts`
-        if !kids && self.language.is_none() && self.animation.is_none() {
-            let taken_now: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-            let mut extra = self.build_personal_rows(&taken_now).await;
-            if self.genre.is_none() {
-                let mut taken_all = taken_now.clone();
-                extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
-                if let Some(r) = self.build_new_row(&taken_all) { r.items.iter().for_each(|i| { taken_all.insert(i.id); }); extra.push(r); }
-            }
-            rows.extend(extra);
-        }
-        // a row named for adult content does not belong on a general page
-        rows.retain(|r| !is_suggestive_title(&r.title));
-        // a row of fewer than 8 titles looks unfinished next to full rows
-        if self.genre.is_none() { rows.retain(|r| r.meta.is_some() || r.items.len() >= 8); }
+        self.layer_season(&mut rows).await;
+        self.layer_kids_banners(&mut rows).await;
+        self.layer_feel(&mut rows);
+        self.layer_personal(&mut rows).await;
+        self.layer_hygiene(&mut rows);
         rows
     }
 
-    /// Inserts extra rows at positions 3, 6, 9 ... (or at the end when the page is shorter), keeping the first rows of the page.
-    pub(crate) fn interleave(&self, mut rows: Vec<Row>, extra: Vec<Row>, first: usize) -> Vec<Row> {
-        for (n, r) in extra.into_iter().enumerate() {
-            let at = (first + 3 * n).min(rows.len());
-            rows.insert(at, r);
+    /// Collection banners (an event, a mood) and up to two seasonal rows (from the row vocabulary, only inside their calendar window) near the top of the home, films and series pages.
+    async fn layer_season(&self, rows: &mut Vec<Row>) {
+        if !(self.is_plain_page() && !self.is_kids() && !self.taxonomy.entries.is_empty()) {
+            return;
         }
-        rows
+        // the collection rows (an event's banner, a mood) are built first so the seasonal rows take what is left
+        let collections = self.build_collection_rows(&taken_ids(rows), 4);
+        rows.extend(collections);
+        let used = taken_ids(rows);
+        let titles = lower_titles(rows);
+        // sub groups of the season's pool when they exist, the flat keyword rows otherwise
+        let seasonal = {
+            let sub = self.build_seasonal_sub_rows(&used);
+            if sub.is_empty() { self.build_seasonal_rows(&used).await } else { sub }
+        };
+        for (n, row) in seasonal.into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).enumerate() {
+            let at = (if n == 0 { 2 } else { 5 + n }).min(rows.len());
+            rows.insert(at, row);
+        }
+    }
+
+    /// A children's page gets its banner collections (named ones and the ones in season), placed by slot like the adult banners.
+    async fn layer_kids_banners(&self, rows: &mut Vec<Row>) {
+        if !(self.is_kids() && self.kids_entries && self.is_plain_page()) {
+            return;
+        }
+        let banners = self.build_kids_collection_rows(&taken_ids(rows), 3).await;
+        rows.extend(banners);
+    }
+
+    /// Rows about how the titles feel and what they are about: late night moods lead a night page, vibe rows, attribute rows, topic rows and one mood row are mixed in.
+    /// Every page that is not a children's or a language page gets them.
+    fn layer_feel(&self, rows: &mut Vec<Row>) {
+        if self.is_kids() || self.language.is_some() || self.animation.is_some() {
+            return;
+        }
+        let used = taken_ids(rows);
+        let mut night_rows: Vec<Row> = Vec::new();
+        if self.late_night && self.genre.is_none() {
+            night_rows.extend(self.build_mood_rows(&used, 2, true));
+        }
+        let mut taken = used;
+        night_rows.iter().for_each(|r| r.items.iter().for_each(|i| { taken.insert(i.id); }));
+        // topic rows that carry only a genre name ("Comedies", "Documentary & Drama") are replaced by rows named for how their titles feel
+        let before = rows.len();
+        if self.genre.is_none() {
+            rows.retain(|r| !(r.kind.is_empty() && r.archetype == "thematic" && is_plain_genre_title(&r.title)));
+        }
+        let removed = before - rows.len();
+        let titles = lower_titles(rows);
+        let vibes: Vec<Row> = self.build_vibe_rows(&taken, 3 + removed.min(8)).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
+        let night = night_rows.len();
+        let mut taken_all = taken;
+        vibes.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
+        let attrs: Vec<Row> = self.build_attribute_rows(&taken_all, 2).into_iter().filter(|r| !titles.contains(&r.title.to_lowercase())).collect();
+        interleave(rows, night_rows, 1);
+        interleave(rows, vibes, 3 + night);
+        interleave(rows, attrs, 5 + night);
+        // topic rows (what the titles are about), a few for each page
+        let topic_rows = self.build_topic_rows(&taken_ids(rows), if self.genre.is_none() { 4 } else { 3 }, &lower_titles(rows));
+        interleave(rows, topic_rows, 4 + night);
+        // one mood row among the topic rows on a page without a genre
+        if self.genre.is_none() && !self.late_night {
+            let on_page = lower_titles(rows);
+            let moods: Vec<Row> = self.build_mood_rows(&taken_ids(rows), 3, false).into_iter().filter(|r| !on_page.contains(&r.title.to_lowercase())).take(1).collect();
+            interleave(rows, moods, 8);
+        }
+    }
+
+    /// Personal rows, New Releases and collections: added here, placed by slot in `place_charts`.
+    async fn layer_personal(&self, rows: &mut Vec<Row>) {
+        if self.is_kids() || self.language.is_some() || self.animation.is_some() {
+            return;
+        }
+        let taken_now = taken_ids(rows);
+        let mut extra = self.build_personal_rows(&taken_now).await;
+        if self.genre.is_none() {
+            let mut taken_all = taken_now;
+            extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));
+            if let Some(r) = self.build_new_row(&taken_all) {
+                extra.push(r);
+            }
+        }
+        rows.extend(extra);
+    }
+
+    /// Rows that do not belong on a page: a row named for adult content, and on a page without a genre a row of fewer than 8 titles (it looks unfinished next to full rows).
+    fn layer_hygiene(&self, rows: &mut Vec<Row>) {
+        rows.retain(|r| !is_suggestive_title(&r.title));
+        if self.genre.is_none() {
+            rows.retain(|r| r.meta.is_some() || r.items.len() >= 8);
+        }
     }
 }

@@ -148,6 +148,31 @@ mod tests {
         assert_eq!(t, vec![("Action".to_string(), 0.6), ("Horror".to_string(), 1.0)]);
     }
 
+    fn query() -> FeedQuery {
+        FeedQuery { rating: None, surface: None, taste: None, affinity: None, genre: None, collection: None, language: None, session_id: None, rows: None, limit: None, offset: None, hour: None,
+            saved: None, recent: None, liked: None }
+    }
+
+    #[test]
+    fn a_verified_profile_decides_the_session_and_the_age_limit() {
+        let caller = Caller { user_id: "user-1".into(), profile_id: Some("profile-9".into()), maturity: Maturity::from_rating("PG").unwrap() };
+        let mut q = query();
+        q.session_id = Some("sess_from_the_query".into());
+        q.rating = Some("18".into());
+        let r = FeedRequest::parse(&q, &Some(caller));
+        // the profile id replaces whatever session the query names, and the profile's own age limit beats the rating in the query
+        assert_eq!(r.session_id.as_deref(), Some("profile-9"));
+        assert_eq!(r.maturity, Maturity::from_rating("PG"));
+
+        // an account without a chosen profile is keyed by the user
+        let user_only = Caller { user_id: "user-1".into(), profile_id: None, maturity: Maturity::from_rating("15").unwrap() };
+        assert_eq!(FeedRequest::parse(&q, &Some(user_only)).session_id.as_deref(), Some("user-1"));
+
+        // an anonymous request keeps the session and the rating of the query
+        let anon = FeedRequest::parse(&q, &None);
+        assert_eq!((anon.session_id.as_deref(), anon.maturity), (Some("sess_from_the_query"), Maturity::from_rating("18")));
+    }
+
     #[test]
     fn paging_and_collection_rules_apply_once() {
         let q = FeedQuery { rating: None, surface: Some("series".into()), taste: None, affinity: Some("Drama".into()), genre: Some(" Crime ".into()), collection: Some("bad id!".into()),
