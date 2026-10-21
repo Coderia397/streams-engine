@@ -31,7 +31,7 @@ impl<'a> PageContext<'a> {
         };
 
         let mut rows: Vec<Row> = Vec::new();
-        let mut used: HashSet<u32> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::default();
         if let Some(r) = self.build_trending_row() {
             r.items.iter().for_each(|i| { used.insert(i.id); });
             rows.push(r);
@@ -124,7 +124,7 @@ impl<'a> PageContext<'a> {
         // 3. Selection: score based diversification (MMR over row definitions) under page rules
         let max_per_type = (((want as f32) * 0.16).ceil() as usize).max(2);
         let max_calendar = 2usize;
-        let mut type_counts: HashMap<String, usize> = HashMap::new();
+        let mut type_counts: HashMap<String, usize> = HashMap::default();
         let mut chosen: Vec<(usize, Vec<u32>)> = Vec::new();
         let mut max_sim: Vec<f32> = vec![0.0; cands.len()];
         let mut alive: Vec<bool> = vec![true; cands.len()];
@@ -313,7 +313,7 @@ impl<'a> PageContext<'a> {
             if scored.len() >= want * 6 { break; }
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let mut rows: Vec<Row> = Vec::new(); let mut used: HashSet<u32> = taken.clone(); let mut names: HashSet<String> = HashSet::new();
+        let mut rows: Vec<Row> = Vec::new(); let mut used: HashSet<u32> = taken.clone(); let mut names: HashSet<String> = HashSet::default();
         for (_, name, items) in scored {
             if rows.len() >= want { break; }
             if !names.insert(name.to_lowercase()) { continue; }

@@ -9,7 +9,7 @@ use crate::identity::{maturity_of, MaybeCaller, Maturity};
 use axum::{extract::{Query, State}, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 use std::sync::Arc;
 
 const ROW_TITLES: usize = 15;
@@ -81,7 +81,7 @@ fn from_catalog(item: &CatalogItem, allowed: bool) -> Cand {
         poster_path: item.poster_path.clone(), backdrop_path: item.backdrop_path.clone(), vote_average: item.vote_average, vote_count: item.vote_count,
         popularity: item.popularity, release_date: String::new(), release_year: item.release_year, genres: item.genres.clone(),
         language: item.original_language.clone(), tv_type: item.tv_type.clone(), cert: item.cert, cert_gb: item.cert_gb, cert_us: item.cert_us,
-        in_catalog: true, allowed, lists: Vec::new(), ranks: HashMap::new(),
+        in_catalog: true, allowed, lists: Vec::new(), ranks: HashMap::default(),
     }
 }
 
@@ -93,7 +93,7 @@ fn from_fresh(f: &FreshItem, catalog_item: Option<&CatalogItem>, allowed: bool) 
             backdrop_path: f.backdrop_path.clone(), vote_average: f.vote_average, vote_count: f.vote_count, popularity: f.popularity,
             release_date: String::new(), release_year: f.release_date.get(..4).and_then(|y| y.parse().ok()), genres: f.genres.clone(),
             language: f.original_language.clone().unwrap_or_default(), tv_type: None, cert: 0, cert_gb: 0, cert_us: 0, in_catalog: false, allowed,
-            lists: Vec::new(), ranks: HashMap::new(),
+            lists: Vec::new(), ranks: HashMap::default(),
         },
     };
     c.popularity = f.popularity.max(if catalog_item.is_some() { 0.0 } else { f.popularity });
@@ -123,7 +123,7 @@ fn fresh_only_allowed(f: &FreshItem, maturity: Option<Maturity>) -> bool {
 /// All candidates: every fresh title, plus the catalog's own newest titles (release year this year or last) for rows that need no date.
 fn candidates(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, year: i32) -> Vec<Cand> {
     let mut out: Vec<Cand> = Vec::new();
-    let mut seen: HashSet<(String, u32)> = HashSet::new();
+    let mut seen: HashSet<(String, u32)> = HashSet::default();
     for f in &fresh.items {
         let cat = resolve_key(catalog, f.id, Some(&f.media_type)).and_then(|k| catalog.get(&k));
         let allowed = match cat {
@@ -277,7 +277,7 @@ pub async fn new_popular(
         }
         None => {
             let rows = desktop_rows(&catalog, &fresh, &pool, maturity, &state.profiles, &today, today_n, year, limit, q.session_id.as_deref().unwrap_or("-"), slot);
-            let mut seen: HashSet<(String, u32)> = HashSet::new();
+            let mut seen: HashSet<(String, u32)> = HashSet::default();
             let mut out: Vec<Value> = Vec::new();
             for (i, row) in rows.into_iter().enumerate() {
                 // a title appears once on the page, in the first row that has it (the two Top 10 rows may share nothing anyway)
@@ -344,7 +344,7 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
 
     // languages with enough new and trending titles each get a row, the biggest first
     let fresh_released: Vec<&Cand> = pool.iter().copied().filter(|c| recent(c, 120)).collect();
-    let mut by_lang: HashMap<&str, usize> = HashMap::new();
+    let mut by_lang: HashMap<&str, usize> = HashMap::default();
     for c in &fresh_released {
         if c.language != "en" && crate::row_label::language_label(&c.language).is_some() {
             *by_lang.entry(c.language.as_str()).or_insert(0) += 1;
@@ -364,7 +364,7 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
     }
 
     // genres with the most new titles
-    let mut by_genre: HashMap<&str, usize> = HashMap::new();
+    let mut by_genre: HashMap<&str, usize> = HashMap::default();
     for c in pool.iter().filter(|c| recent(c, 90)) {
         for g in &c.genres {
             if crate::row_label::genre_noun(g).is_some() && g != "Drama" {
@@ -393,7 +393,7 @@ fn desktop_rows(catalog: &CatalogMap, fresh: &FreshStore, pool: &[&Cand], maturi
         .map(|c| (c.vote_average + 0.35 * (c.vote_count as f32).ln() + 1.6 * crate::page::entry_noise(session, c.tmdb_id as usize + slot), c))
         .collect();
     gems.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.tmdb_id.cmp(&b.1.tmdb_id)));
-    let mut per_genre: HashMap<&str, usize> = HashMap::new();
+    let mut per_genre: HashMap<&str, usize> = HashMap::default();
     let (mut films, mut series): (Vec<&Cand>, Vec<&Cand>) = (Vec::new(), Vec::new());
     for (_, c) in gems {
         let g = c.genres.first().map_or("", |g| g.as_str());

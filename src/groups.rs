@@ -2,7 +2,7 @@
 //! and bottom up theme groups. Used to boost recommendations inside the same group; empty when the columns are missing.
 use crate::catalog::item_key;
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
+use crate::det::HashMap;
 use tracing::info;
 
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +20,7 @@ pub struct GroupIds {
 pub type GroupMap = HashMap<u32, GroupIds>;
 
 pub fn load(db_path: &str) -> GroupMap {
-    let mut map = GroupMap::new();
+    let mut map = GroupMap::default();
     let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else { return map };
     let Ok(mut stmt) = conn.prepare("SELECT media_type, tmdb_id, w1, w2, atom, th2, th1, th3, CASE WHEN vcore = 1 THEN vf END FROM titles WHERE w1 IS NOT NULL") else { return map };
     let Ok(rows) = stmt.query_map([], |r| {
@@ -46,7 +46,7 @@ pub type GroupNames = HashMap<(u8, i32), String>;
 
 /// Names of the groups (table `groups`, written by the naming run), keyed by hierarchy level and group id.
 pub fn load_names(db_path: &str) -> GroupNames {
-    let mut map = GroupNames::new();
+    let mut map = GroupNames::default();
     let Ok(conn) = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else { return map };
     let Ok(mut stmt) = conn.prepare("SELECT kind, level, id, name FROM groups WHERE kind IN ('world','theme','vibe') AND name IS NOT NULL AND name != ''") else { return map };
     let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?))) else { return map };
@@ -60,7 +60,7 @@ pub fn load_names(db_path: &str) -> GroupNames {
 
 /// Members of every vibe group (fine level), for rows: group id to the item keys of its core members.
 pub fn vibe_members(groups: &GroupMap) -> HashMap<i32, Vec<u32>> {
-    let mut m: HashMap<i32, Vec<u32>> = HashMap::new();
+    let mut m: HashMap<i32, Vec<u32>> = HashMap::default();
     for (k, g) in groups { if g.vf >= 0 { m.entry(g.vf).or_default().push(*k); } }
     for v in m.values_mut() { v.sort_unstable(); }
     m

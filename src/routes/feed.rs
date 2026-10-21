@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashSet;
+use crate::det::HashSet;
 use std::sync::Arc;
 
 /// Query parameters for GET /api/feed
@@ -98,9 +98,9 @@ pub fn language_row_cap(catalog: &crate::catalog::CatalogMap, profiles: &crate::
 fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, spec: &crate::genre_spec::GenreSpec, maturity: Option<crate::identity::Maturity>) -> usize {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    static CAPS: OnceLock<Mutex<std::collections::HashMap<String, (usize, Instant)>>> = OnceLock::new();
+    static CAPS: OnceLock<Mutex<crate::det::HashMap<String, (usize, Instant)>>> = OnceLock::new();
     let key = format!("{surface}|{spec:?}|{}|{}|{}", catalog.len(), profiles.profiles.len(), maturity.map_or("-", |m| m.as_str()));
-    let map = CAPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let map = CAPS.get_or_init(|| Mutex::new(crate::det::HashMap::default()));
     if let Some((v, at)) = map.lock().unwrap().get(&key) {
         if at.elapsed() < Duration::from_secs(600) {
             return *v;
@@ -114,9 +114,9 @@ fn genre_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::
 fn language_row_cap_cached(catalog: &crate::catalog::CatalogMap, profiles: &crate::profiles::ProfileStore, surface: &str, language: &str, maturity: Option<crate::identity::Maturity>) -> usize {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    static CAPS: OnceLock<Mutex<std::collections::HashMap<String, (usize, Instant)>>> = OnceLock::new();
+    static CAPS: OnceLock<Mutex<crate::det::HashMap<String, (usize, Instant)>>> = OnceLock::new();
     let key = format!("{surface}|{language}|{}|{}|{}", catalog.len(), profiles.profiles.len(), maturity.map_or("-", |m| m.as_str()));
-    let map = CAPS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let map = CAPS.get_or_init(|| Mutex::new(crate::det::HashMap::default()));
     if let Some((v, at)) = map.lock().unwrap().get(&key) {
         if at.elapsed() < Duration::from_secs(600) {
             return *v;
@@ -221,7 +221,7 @@ pub async fn feed(
     let (session_taste, session_seen, session_version) = match &session_state {
         Some(s) => {
             let s = s.lock().unwrap();
-            (s.taste(), s.seen_ids().clone(), s.version)
+            (s.taste(), s.seen_ids().iter().copied().collect::<HashSet<u32>>(), s.version)
         }
         None => (Vec::new(), Default::default(), 0),
     };
@@ -362,7 +362,7 @@ fn blocked_row_titles(db_path: &str) -> HashSet<String> {
 /// across rows (earlier rows win) and rows left with too few items are dropped.
 fn to_client_rows(rows: Vec<Row>, already_seen: &HashSet<u32>, profiles: &crate::profiles::ProfileStore, fresh: &crate::fresh::FreshStore) -> Vec<serde_json::Value> {
     const MIN_ROW_ITEMS: usize = 4;
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     let mut out = Vec::new();
     let today = crate::fresh::today_days();
 

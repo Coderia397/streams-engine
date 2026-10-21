@@ -94,7 +94,7 @@ pub async fn recommendations(
         similar = state.vectors.brute_force_topk(&anchor_vec, fetch);
     }
     let mut keys: Vec<u32> = similar.iter().map(|(k, _)| *k).filter(|k| *k != anchor_key).collect();
-    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_keys = crate::det::HashSet::default();
     keys.retain(|k| seen_keys.insert(*k));
 
     let anchor_c = centred(&state, anchor_idx);
@@ -129,8 +129,8 @@ pub async fn recommendations(
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.2.id.cmp(&b.2.id)));
 
     // one title once (the best of its versions) and at most three titles from one franchise (the first word they share)
-    let mut seen_titles: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut franchise: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_titles: crate::det::HashSet<(String, String)> = crate::det::HashSet::default();
+    let mut franchise: crate::det::HashMap<String, usize> = crate::det::HashMap::default();
     let results: Vec<_> = scored
         .into_iter()
         .filter(|(_, _, item)| {

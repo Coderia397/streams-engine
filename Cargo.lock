@@ -1609,6 +1609,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rusqlite",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tokio",

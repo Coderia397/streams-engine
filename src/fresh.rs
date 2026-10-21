@@ -3,7 +3,7 @@
 //! The engine re-reads the file when it changes.
 use arc_swap::ArcSwap;
 use serde::Deserialize;
-use std::collections::HashMap;
+use crate::det::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

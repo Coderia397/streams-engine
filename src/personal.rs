@@ -6,7 +6,7 @@ use crate::catalog::CatalogItem;
 use crate::page::{entry_noise, PageContext, Row};
 use crate::vectors::{cosine_sim, l2_normalize, DIMS};
 use serde_json::json;
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 const NEW_RELEASE_DAYS: i64 = 45;
 const GEM_MIN_RATING: f32 = 7.4;
@@ -143,7 +143,7 @@ impl<'a> PageContext<'a> {
         let anchors = |keys: &[u32], skip: &HashSet<u32>| -> Vec<&CatalogItem> {
             keys.iter().filter(|k| !skip.contains(*k)).filter_map(|k| self.catalog.get(k)).filter(|i| self.personal_ok(i)).collect()
         };
-        let mut anchor_used: HashSet<u32> = HashSet::new();
+        let mut anchor_used: HashSet<u32> = HashSet::default();
         // Because You Watched <title>: up to two of the latest watched titles
         for a in anchors(&sig.recent, &anchor_used).into_iter().take(2) {
             anchor_used.insert(a.id);

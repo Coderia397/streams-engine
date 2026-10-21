@@ -110,7 +110,7 @@ impl<'a> PageContext<'a> {
         let mut rows: Vec<Row> = Vec::new();
         if let Some(r) = self.build_trending_row() { rows.push(r); }
         let mut used: HashSet<u32> = rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect();
-        let mut titles: HashSet<String> = HashSet::new();
+        let mut titles: HashSet<String> = HashSet::default();
         for sub in subs {
             if rows.len() > self.target_rows { break; }
             if sub.kw_share < SEASON_MIN_KW_SHARE { continue; }
@@ -153,7 +153,7 @@ impl<'a> PageContext<'a> {
             }
         }
         // a row name used twice by the two halves keeps its first use
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::default();
         out.retain(|r| r.archetype == "trending" || seen.insert(r.title.clone()));
         out
     }
@@ -164,7 +164,7 @@ impl<'a> PageContext<'a> {
         if let Some(slug) = id.strip_prefix("topic_") { return self.build_topic_collection(slug); }
         let m = self.vibe.moods.iter().find(|m| m.id == id)?;
         let mut rows: Vec<Row> = Vec::new();
-        let mut used: HashSet<u32> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::default();
         if let Some(r) = self.mood_row(m, &used) {
             r.items.iter().for_each(|i| { used.insert(i.id); });
             rows.push(r);
@@ -195,16 +195,16 @@ impl<'a> PageContext<'a> {
     pub(crate) fn build_topic_collection(&self, slug: &str) -> Option<(Vec<Row>, serde_json::Value)> {
         let topic = self.topics.topics.get(slug)?;
         let keys = self.catalog.topic_keys.get(slug)?;
-        let all = self.eligible(keys, &HashSet::new(), true);
+        let all = self.eligible(keys, &HashSet::default(), true);
         if all.len() < 12 { return None; }
         let mut rows: Vec<Row> = Vec::new();
-        let mut used: HashSet<u32> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::default();
         if let Some(r) = self.row_of(&topic.name, "topic", &all) {
             r.items.iter().for_each(|i| { used.insert(i.id); });
             rows.push(r);
         }
         // by genre
-        let mut by_genre: std::collections::HashMap<&str, Vec<&CatalogItem>> = std::collections::HashMap::new();
+        let mut by_genre: crate::det::HashMap<&str, Vec<&CatalogItem>> = crate::det::HashMap::default();
         for i in &all { if let Some(g) = i.genres.first() { by_genre.entry(g.as_str()).or_default().push(i); } }
         let mut genres: Vec<(&str, Vec<&CatalogItem>)> = by_genre.into_iter().filter(|(_, v)| v.len() >= 10).collect();
         genres.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));

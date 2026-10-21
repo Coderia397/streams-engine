@@ -5,7 +5,7 @@
 use axum::{extract::{Query, State}, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::app::AppState;
@@ -78,8 +78,8 @@ pub async fn suggestions(State(state): State<Arc<AppState>>, MaybeCaller(caller)
     // three of a genre
     sources.sort_by(|a, b| crate::page::entry_noise(&session, a.0.len() * 13 + slot).partial_cmp(&crate::page::entry_noise(&session, b.0.len() * 13 + slot)).unwrap_or(std::cmp::Ordering::Equal));
     let mut cursors = vec![0usize; sources.len()];
-    let mut used: HashSet<u32> = HashSet::new();
-    let mut per_genre: HashMap<&str, usize> = HashMap::new();
+    let mut used: HashSet<u32> = HashSet::default();
+    let mut per_genre: HashMap<&str, usize> = HashMap::default();
     let mut picked: Vec<(&'static str, &CatalogItem)> = Vec::new();
     'fill: loop {
         let mut progressed = false;

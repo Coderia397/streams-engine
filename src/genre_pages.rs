@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn every_page_name_resolves_to_a_rule_and_ids_are_unique_per_surface() {
         for surface in ["movie", "tv"] {
-            let mut ids = std::collections::HashSet::new();
+            let mut ids = crate::det::HashSet::default();
             for (id, name) in pages(surface) {
                 assert!(ids.insert(*id), "{surface}: id {id} twice");
                 assert!(crate::genre_spec::resolve(name, surface) != crate::genre_spec::GenreSpec::Unsupported || *name == "Astrology", "{surface}: {name} has no rule");

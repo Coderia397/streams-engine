@@ -3,7 +3,7 @@
 //! Without those files no topic row is built. A page gets a few of them, chosen by the session and the six hour slot, only from topics that fill a row on that page.
 use crate::page::{entry_noise, PageContext, Row};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct Topic {
@@ -24,16 +24,16 @@ pub struct TopicStore {
 impl TopicStore {
     pub fn load(dir: &str) -> Self {
         let Some(raw) = std::fs::read_to_string(std::path::Path::new(dir).join("topics_meta.json")).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { return Self::default() };
-        let mut topics = HashMap::new();
+        let mut topics = HashMap::default();
         for (slug, v) in raw.as_object().into_iter().flatten() {
             let Some(name) = v.get("name").and_then(|n| n.as_str()) else { continue };
             let media = v.get("media").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
             let definition = v.get("definition").and_then(|d| d.as_str()).unwrap_or_default().to_string();
             topics.insert(slug.clone(), Topic { name: name.to_string(), definition, media });
         }
-        let mut df: HashMap<String, u32> = HashMap::new();
+        let mut df: HashMap<String, u32> = HashMap::default();
         for t in topics.values() {
-            let words: std::collections::HashSet<String> = words_of(&format!("{} {}", t.name, t.definition)).into_iter().collect();
+            let words: crate::det::HashSet<String> = words_of(&format!("{} {}", t.name, t.definition)).into_iter().collect();
             for w in words { *df.entry(w).or_insert(0) += 1; }
         }
         Self { topics, df }
@@ -122,12 +122,12 @@ mod tests {
 
     #[test]
     fn a_free_text_query_finds_the_topic_that_describes_it() {
-        let mut topics = HashMap::new();
+        let mut topics = HashMap::default();
         for (slug, name, def) in [("space", "Space & Aliens", "A story set in space or about aliens"), ("heists", "Heists & Capers", "A story about a robbery"), ("legal", "Courtroom Dramas", "A drama about lawyers and trials"), ("a", "Family Stories", "A story about family"), ("b", "War Stories", "A story about war")] {
             topics.insert(slug.to_string(), Topic { name: name.into(), definition: def.into(), media: vec![] });
         }
-        let mut df = HashMap::new();
-        for t in topics.values() { for w in words_of(&format!("{} {}", t.name, t.definition)).into_iter().collect::<std::collections::HashSet<_>>() { *df.entry(w).or_insert(0) += 1; } }
+        let mut df = HashMap::default();
+        for t in topics.values() { for w in words_of(&format!("{} {}", t.name, t.definition)).into_iter().collect::<crate::det::HashSet<_>>() { *df.entry(w).or_insert(0) += 1; } }
         let store = TopicStore { topics, df };
         assert_eq!(store.match_query("movies about space").first().map(|m| m.0), Some("space"));
         assert!(store.match_query("movies about").is_empty(), "common words alone name no topic");

@@ -2,7 +2,7 @@ use crate::catalog::CatalogMap;
 use crate::quality::bayesian_quality_score;
 use crate::vectors::{l2_normalize, VectorStore, DIMS};
 use anyhow::Result;
-use std::collections::HashMap;
+use crate::det::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
@@ -86,7 +86,7 @@ impl CentroidVault {
             );
 
         // Normalise each centroid to unit sphere
-        let mut centroids = HashMap::new();
+        let mut centroids = HashMap::default();
         for (gi, label) in GENRE_LABELS.iter().enumerate() {
             if counts[gi] > 0 {
                 let mut vec = std::mem::take(&mut sums[gi]);

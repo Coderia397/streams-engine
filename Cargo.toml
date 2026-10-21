@@ -38,6 +38,7 @@ half             = "2.4"                                           # f16 storage
 # Vector / ANN
 usearch          = "2.1"                                           # HNSW ANN index
 rayon            = "1"                                             # parallel brute-force + k-means
+rustc-hash       = "2"                                             # fixed hasher: same keys, same iteration order
 
 # Shelf Alignment
 pathfinding      = "4.12"                                          # Hungarian algorithm

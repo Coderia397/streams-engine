@@ -17,7 +17,8 @@ use crate::titles::{byw_title, clamp_words, derive_title};
 use crate::vectors::{cosine_sim, l2_normalize, sphere_mean, VectorStore, DIMS};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::det::{HashMap, HashSet};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
@@ -133,10 +134,10 @@ impl Default for PageState {
 impl PageState {
     pub fn new() -> Self {
         Self {
-            used_titles:      HashSet::new(),
+            used_titles:      HashSet::default(),
             recent_genres:    VecDeque::new(),
             placed_centroids: Vec::new(),
-            used_ids:         HashSet::new(),
+            used_ids:         HashSet::default(),
             nonscripted_rows: 0,
         }
     }
@@ -453,7 +454,7 @@ impl<'a> PageContext<'a> {
         let mut rows = self.place_charts(rows);
         // another version of the same title (a remake, a re-release) is not a second suggestion in one row
         for row in &mut rows {
-            let mut seen: HashSet<(String, String)> = HashSet::new();
+            let mut seen: HashSet<(String, String)> = HashSet::default();
             row.items.retain(|i| seen.insert((i.media_type.clone(), crate::people::normalise(&i.title))));
         }
         rows
@@ -859,7 +860,7 @@ impl<'a> PageContext<'a> {
 
     /// The row of one mood: titles of its vibe groups ranked by their fit to the mood phrase; None when fewer than 12 titles are free.
     pub(crate) fn mood_row(&self, m: &crate::vibe::Mood, used: &HashSet<u32>) -> Option<Row> {
-        let mut cand: Vec<(f32, &CatalogItem)> = Vec::new(); let mut seen: HashSet<u32> = HashSet::new();
+        let mut cand: Vec<(f32, &CatalogItem)> = Vec::new(); let mut seen: HashSet<u32> = HashSet::default();
         // the phrase vector, centred like the title vectors; a title is ranked by its own fit to the phrase as well as by the review match of its vibe group
         let mv: Option<Vec<f32>> = (m.vector.len() == DIMS).then(|| { let mut c: Vec<f32> = m.vector.iter().zip(self.mean).map(|(x, mu)| x - mu).collect(); l2_normalize(&mut c); c });
         for (g, score) in m.groups.iter().take(6) {
@@ -947,7 +948,7 @@ impl<'a> PageContext<'a> {
     /// Build row items from ranked ids; no significant title word is shared by more than FRANCHISE_CAP titles.
     pub(crate) fn diverse_titles(&self, ids: &[u32], n: usize) -> Vec<RowItem> {
         let cap = if safety_nets() { FRANCHISE_CAP } else { usize::MAX };
-        let mut per: HashMap<String, usize> = HashMap::new();
+        let mut per: HashMap<String, usize> = HashMap::default();
         let mut out: Vec<RowItem> = Vec::with_capacity(n);
         for id in ids {
             let Some(item) = self.catalog.get(id) else { continue };
@@ -1035,7 +1036,7 @@ fn is_suggestive_title(title: &str) -> bool {
 
 /// The genre most of a row's titles carry (at least 40 percent of them), empty when no genre leads.
 fn dominant_genre(row: &Row) -> String {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = HashMap::default();
     for i in &row.items {
         for g in i.genres.iter().take(3) { *counts.entry(g.as_str()).or_insert(0) += 1; }
     }
@@ -1129,7 +1130,7 @@ pub fn member_quality_for(spec: Option<&crate::genre_spec::GenreSpec>, item: &Ca
 
 /// Second most common genre, if any.
 fn second_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>, first: &str) -> Option<String> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut counts: HashMap<&str, usize> = HashMap::default();
     for genres in genres_iter {
         for g in genres {
             if g != first && !g.contains(first) && !first.contains(g.as_str()) {
@@ -1137,12 +1138,12 @@ fn second_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>, first: &str
             }
         }
     }
-    counts.into_iter().max_by_key(|(_, c)| *c).map(|(g, _)| g.to_string())
+    counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|(g, _)| g.to_string())
 }
 
 /// Decade label ("90s", "2010s") when at least half of the items share a decade.
 fn dominant_era(items: &[RowItem]) -> Option<String> {
-    let mut counts: HashMap<i32, usize> = HashMap::new();
+    let mut counts: HashMap<i32, usize> = HashMap::default();
     let mut total = 0usize;
     for it in items {
         if let Some(y) = it.release_year {
@@ -1150,7 +1151,7 @@ fn dominant_era(items: &[RowItem]) -> Option<String> {
             total += 1;
         }
     }
-    let (decade, n) = counts.into_iter().max_by_key(|(_, c)| *c)?;
+    let (decade, n) = counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))?;
     if total == 0 || n * 10 < total * 7 {
         return None;
     }
@@ -1160,7 +1161,7 @@ fn dominant_era(items: &[RowItem]) -> Option<String> {
 
 /// Dominant genre from an iterator of genre slices (majority vote).
 fn majority_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>) -> String {
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<String, usize> = HashMap::default();
     for genres in genres_iter {
         for genre in genres {
             *counts.entry(genre.clone()).or_insert(0) += 1;
@@ -1168,7 +1169,7 @@ fn majority_genre<'a>(genres_iter: impl Iterator<Item = &'a [String]>) -> String
     }
     counts
         .into_iter()
-        .max_by_key(|(_, c)| *c)
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
         .map(|(g, _)| g)
         .unwrap_or_else(|| "Drama".to_string())
 }

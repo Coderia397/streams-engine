@@ -7,7 +7,7 @@
 //! 143 of 1,000 on the first part, among them a late night talk show); only "central" counts.
 use crate::catalog::item_key;
 use serde_json::Value;
-use std::collections::HashMap;
+use crate::det::HashMap;
 use std::path::Path;
 
 
@@ -131,7 +131,7 @@ fn tone_display(word: &str) -> Option<&'static str> {
 
 impl ProfileStore {
     pub fn empty() -> Self {
-        Self { index: HashMap::new(), profiles: Vec::new(), tone_share: HashMap::new(), theme_share: HashMap::new() }
+        Self { index: HashMap::default(), profiles: Vec::new(), tone_share: HashMap::default(), theme_share: HashMap::default() }
     }
 
     /// The theme that sets a row apart: carried by at least `min_share` of the row's titles and at least `min_lift` times more often than across
@@ -140,7 +140,7 @@ impl ProfileStore {
         if profiles.is_empty() {
             return None;
         }
-        let mut count: HashMap<&str, usize> = HashMap::new();
+        let mut count: HashMap<&str, usize> = HashMap::default();
         for p in profiles {
             let mut seen: Vec<&str> = Vec::new();
             for t in &p.themes {
@@ -167,7 +167,7 @@ impl ProfileStore {
         if profiles.is_empty() {
             return None;
         }
-        let mut count: HashMap<&'static str, usize> = HashMap::new();
+        let mut count: HashMap<&'static str, usize> = HashMap::default();
         for p in profiles {
             let mut seen: Vec<&'static str> = Vec::new();
             for w in &p.tone {
@@ -210,7 +210,7 @@ impl ProfileStore {
             store.index.insert(item_key(media, id), store.profiles.len());
             store.profiles.push(profile);
         }
-        let mut tone_count: HashMap<&'static str, usize> = HashMap::new();
+        let mut tone_count: HashMap<&'static str, usize> = HashMap::default();
         for p in &store.profiles {
             let mut seen: Vec<&'static str> = Vec::new();
             for w in &p.tone {
@@ -223,7 +223,7 @@ impl ProfileStore {
             }
         }
         let total = store.profiles.len().max(1) as f32;
-        let mut theme_count: HashMap<String, usize> = HashMap::new();
+        let mut theme_count: HashMap<String, usize> = HashMap::default();
         for p in &store.profiles {
             let mut seen: Vec<&str> = Vec::new();
             for th in &p.themes {
@@ -245,7 +245,7 @@ pub fn row_theme(profiles: &[&TitleProfile], min_share: f32) -> Option<(String, 
     if profiles.is_empty() {
         return None;
     }
-    let mut count: HashMap<&str, usize> = HashMap::new();
+    let mut count: HashMap<&str, usize> = HashMap::default();
     for p in profiles {
         let mut seen: Vec<&str> = Vec::new();
         for t in &p.themes {

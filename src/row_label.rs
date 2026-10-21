@@ -11,7 +11,7 @@
 //! Themes come from TMDB keywords: a theme counts when at least 40 percent of the row carries one of its keywords.
 
 use crate::catalog::CatalogItem;
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 /// (TMDB keyword, phrase, standalone). Standalone phrases are a whole title; the others go before a genre noun.
 const THEMES: &[(&str, &str, bool)] = &[
@@ -253,7 +253,7 @@ pub fn theme_title(theme: &str, items: &[&CatalogItem]) -> Option<String> {
     if words.is_empty() || words.len() > 3 || matches!(theme, "entertainment" | "comedy" | "drama" | "humor" | "action" | "family") {
         return None;
     }
-    let mut count: HashMap<&str, usize> = HashMap::new();
+    let mut count: HashMap<&str, usize> = HashMap::default();
     for it in items {
         let mut seen: Vec<&str> = Vec::new();
         for g in &it.genres {
@@ -280,7 +280,7 @@ pub fn tone_title(tone: &str, items: &[&CatalogItem]) -> Option<String> {
     if n < 4 {
         return None;
     }
-    let mut count: HashMap<&str, usize> = HashMap::new();
+    let mut count: HashMap<&str, usize> = HashMap::default();
     for it in items {
         let mut seen: Vec<&str> = Vec::new();
         for g in &it.genres {
@@ -325,7 +325,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let share = |count: usize| count as f32 / n as f32;
 
     // genres (movie naming), most common first
-    let mut gcount: HashMap<&str, usize> = HashMap::new();
+    let mut gcount: HashMap<&str, usize> = HashMap::default();
     for it in items {
         let mut seen: Vec<&str> = Vec::new();
         for g in &it.genres {
@@ -354,7 +354,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     // country (origin, else language), skipping the US default
     // The country a viewer would name is the first listed one, and only when the original language fits it (a Spanish
     // language film with a French co-producer is not a French film; one country counted per title).
-    let mut ccount: HashMap<&str, usize> = HashMap::new();
+    let mut ccount: HashMap<&str, usize> = HashMap::default();
     for it in items {
         if let Some(c) = primary_country(it) {
             if c != "US" {
@@ -365,7 +365,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     let country_adj = ccount
         .into_iter()
         .filter(|(_, c)| share(*c) >= 0.6)
-        .max_by_key(|(_, c)| *c)
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
         .and_then(|(c, _)| demonym(c));
 
     // themes: phrase -> number of items carrying one of its keywords
@@ -386,7 +386,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     themes.sort_by_key(|t| std::cmp::Reverse(t.2));
 
     // decade, strict
-    let mut dcount: HashMap<i32, usize> = HashMap::new();
+    let mut dcount: HashMap<i32, usize> = HashMap::default();
     let mut dtotal = 0usize;
     for it in items {
         if let Some(y) = it.release_year {
@@ -396,7 +396,7 @@ pub fn candidates(items: &[&CatalogItem]) -> Vec<String> {
     }
     let decade = dcount
         .into_iter()
-        .max_by_key(|(_, c)| *c)
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
         .filter(|(_, c)| dtotal > 0 && *c * 10 >= dtotal * 7)
         .map(|(d, _)| decade_label(d));
 

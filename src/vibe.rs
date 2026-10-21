@@ -4,7 +4,7 @@
 //!  `season_groups` and `season_members`  per calendar event the sub groups of its pool (named) and their titles
 use crate::catalog::item_key;
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
+use crate::det::HashMap;
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ pub fn load(db_path: &str, members: HashMap<i32, Vec<u32>>) -> VibeIndex {
             }
         }
     }
-    let mut names: HashMap<(String, i32), String> = HashMap::new();
+    let mut names: HashMap<(String, i32), String> = HashMap::default();
     if let Ok(mut stmt) = conn.prepare("SELECT event, sub, name FROM season_groups") {
         if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as i32, r.get::<_, String>(2)?))) {
             for (e, s, n) in rows.flatten() { names.insert((e, s), n); }
@@ -65,7 +65,7 @@ pub fn load(db_path: &str, members: HashMap<i32, Vec<u32>>) -> VibeIndex {
     }
     if let Ok(mut stmt) = conn.prepare("SELECT event, sub, media_type, tmdb_id, kw FROM season_members ORDER BY event, sub, rank") {
         if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as i32, r.get::<_, String>(2)?, r.get::<_, i64>(3)? as u32, r.get::<_, i64>(4)? != 0))) {
-            let mut subs: HashMap<(String, i32), (Vec<u32>, usize)> = HashMap::new();
+            let mut subs: HashMap<(String, i32), (Vec<u32>, usize)> = HashMap::default();
             for (e, s, mt, id, kw) in rows.flatten() { let v = subs.entry((e, s)).or_default(); v.0.push(item_key(&mt, id)); v.1 += kw as usize; }
             for ((e, s), (items, kw)) in subs {
                 let kw_share = kw as f32 / items.len().max(1) as f32;

@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use half::f16;
 use memmap2::MmapOptions;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use crate::det::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 use tracing::info;

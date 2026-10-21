@@ -2,7 +2,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use rusqlite::{Connection, OpenFlags};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::collections::HashMap;
+use crate::det::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -150,7 +150,7 @@ impl Catalog {
         let mut chart: Vec<&CatalogItem> = items.values().filter(|i| crate::page::chart_ok(i)).collect();
         chart.sort_unstable_by(|a, b| b.popularity.total_cmp(&a.popularity).then_with(|| a.id.cmp(&b.id)));
         let chart_keys = chart.into_iter().map(|i| i.id).collect();
-        let mut attr_keys: HashMap<&'static str, Vec<u32>> = HashMap::new();
+        let mut attr_keys: HashMap<&'static str, Vec<u32>> = HashMap::default();
         for spec in crate::attributes::SPECS {
             let mut v: Vec<&CatalogItem> = items.values().filter(|i| crate::page::passes_member_quality(i) && (spec.test)(i)).collect();
             crate::quality::sort_by_quality(&mut v);
@@ -159,7 +159,7 @@ impl Catalog {
         let mut gems: Vec<&CatalogItem> = items.values().filter(|i| crate::page::passes_member_quality(i) && crate::personal::is_gem(i)).collect();
         crate::quality::sort_by_quality(&mut gems);
         let gem_keys = gems.into_iter().map(|i| i.id).collect();
-        let mut by_topic: HashMap<String, Vec<&CatalogItem>> = HashMap::new();
+        let mut by_topic: HashMap<String, Vec<&CatalogItem>> = HashMap::default();
         for i in items.values() {
             for k in &i.keywords {
                 if let Some(slug) = k.strip_prefix("topic:") { by_topic.entry(slug.to_string()).or_default().push(i); }
@@ -363,7 +363,7 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<CatalogItem> {
 /// The catalog query: the column list of `catalog` (older files lack some columns, which then take defaults) and the name of the id column.
 fn catalog_sql(conn: &Connection) -> Result<(String, &'static str)> {
     // catalog_v2 has `tmdb_id` (the primary key `id` there is the internal key) plus optional extra columns.
-    let cols: std::collections::HashSet<String> = conn
+    let cols: crate::det::HashSet<String> = conn
         .prepare("PRAGMA table_info(catalog)")?
         .query_map([], |r| r.get::<_, String>(1))?
         .filter_map(|r| r.ok())
@@ -406,7 +406,7 @@ pub fn load_catalog(db_path: &str) -> Result<CatalogMap> {
             .collect();
         handles.into_iter().map(|h| h.join().expect("catalog loader panicked")).collect()
     });
-    let mut map = HashMap::with_capacity(900_000);
+    let mut map = crate::det::map_with_capacity(900_000);
     for part in results {
         for item in part? {
             map.insert(item.id, item);

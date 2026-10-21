@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use crate::det::HashSet;
 use std::sync::Arc;
 use rusqlite::Connection;
 use crate::app::AppState;
@@ -209,7 +209,7 @@ pub async fn search(
     } else {
         title_keys.iter().chain(person_keys.iter()).chain(fuzzy_keys.iter()).chain(word_keys.iter().take(8)).chain(other_keys.iter()).chain(topic_keys.iter()).copied().collect()
     };
-    let mut seen: HashSet<u32> = HashSet::new();
+    let mut seen: HashSet<u32> = HashSet::default();
     let results: Vec<Value> = ordered
         .into_iter()
         .filter(|k| seen.insert(*k))

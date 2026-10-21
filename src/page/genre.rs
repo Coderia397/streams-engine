@@ -134,7 +134,7 @@ impl<'a> PageContext<'a> {
         if !self.groups.is_empty() {
             let mut best: Option<(u8, Vec<GroupItems>)> = None;
             for level in 0..crate::groups::N_LEVELS {
-                let mut by: HashMap<i32, Vec<usize>> = HashMap::new();
+                let mut by: HashMap<i32, Vec<usize>> = HashMap::default();
                 for (i, (it, _)) in items_all.iter().enumerate() {
                     if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { by.entry(id).or_default().push(i); } }
                 }
@@ -161,7 +161,7 @@ impl<'a> PageContext<'a> {
             // items of the kept groups, in group order; a group's centre is the mean of its members
             let mut sel: Vec<(&CatalogItem, Vec<f32>)> = Vec::with_capacity(idx.len());
             let mut cid: Vec<usize> = Vec::with_capacity(idx.len());
-            let mut taken: HashMap<(u8, i32), usize> = HashMap::new();
+            let mut taken: HashMap<(u8, i32), usize> = HashMap::default();
             for (c, key) in ids.iter().enumerate() { taken.insert(*key, c); }
             for i in idx {
                 let it = items_all[i].0;
@@ -383,7 +383,7 @@ impl<'a> PageContext<'a> {
     pub(super) fn majority_group_name(&self, items: &[&CatalogItem]) -> Option<String> {
         if items.is_empty() { return None; }
         for level in 0..crate::groups::N_LEVELS {
-            let mut count: HashMap<i32, usize> = HashMap::new();
+            let mut count: HashMap<i32, usize> = HashMap::default();
             for it in items { if let Some(g) = self.groups.get(&it.id) { let id = g.at(level); if id >= 0 { *count.entry(id).or_insert(0) += 1; } } }
             if let Some((id, n)) = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))) {
                 if n * 2 >= items.len() {

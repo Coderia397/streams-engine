@@ -2,7 +2,7 @@
 //! database at start. The catalog's full text index covers title, overview, genres and director only, so a search for an actor would
 //! otherwise find nothing.
 use rusqlite::Connection;
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 /// Titles below this popularity are left out of the index (kept small; a person is found through the titles people watch).
 const MIN_POPULARITY: f64 = 1.5;
@@ -36,7 +36,7 @@ impl PeopleIndex {
         let Ok(mut stmt) = conn.prepare("SELECT id, popularity, director, cast_members FROM catalog WHERE popularity >= ?1 AND (cast_members IS NOT NULL OR director IS NOT NULL)") else {
             return Self::default();
         };
-        let mut names: HashMap<String, Vec<(u32, f32)>> = HashMap::new();
+        let mut names: HashMap<String, Vec<(u32, f32)>> = HashMap::default();
         let rows = stmt.query_map([MIN_POPULARITY], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
         });
@@ -94,7 +94,7 @@ impl PeopleIndex {
             return (false, Vec::new());
         }
         let exact = self.names.contains_key(&q);
-        let mut best: HashMap<u32, f32> = HashMap::new();
+        let mut best: HashMap<u32, f32> = HashMap::default();
         for (name, titles) in &self.names {
             if name == &q || (q.contains(' ') && name.starts_with(&q)) {
                 for &(k, p) in titles {

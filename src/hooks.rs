@@ -79,10 +79,10 @@ fn kids_chart_rank(env: &HookEnv, item: &CatalogItem) -> Option<usize> {
 }
 
 /// How many well known titles (rated 7 or more by a thousand voters) each director or creator has in the catalog, by lower case name. A credit line is shown only for people with a real body of work.
-fn notable_credits(catalog: &Catalog) -> &'static std::collections::HashMap<String, u16> {
-    static MAP: std::sync::OnceLock<std::collections::HashMap<String, u16>> = std::sync::OnceLock::new();
+fn notable_credits(catalog: &Catalog) -> &'static crate::det::HashMap<String, u16> {
+    static MAP: std::sync::OnceLock<crate::det::HashMap<String, u16>> = std::sync::OnceLock::new();
     MAP.get_or_init(|| {
-        let mut m: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+        let mut m: crate::det::HashMap<String, u16> = crate::det::HashMap::default();
         for it in catalog.values() {
             if it.vote_average < 7.0 || it.vote_count < 1000 { continue; }
             if let Some(d) = it.director.as_deref() {

@@ -110,7 +110,7 @@ impl<'a> PageContext<'a> {
             // a collection that sits next to one already on the page waits
             if chosen.iter().any(|&c| cosine_sim(&self.taxonomy.entries[c].centered, &e.centered) > APART) { continue; }
             let mut lead: Vec<&CatalogItem> = Vec::new();
-            let mut seen: HashSet<u32> = HashSet::new();
+            let mut seen: HashSet<u32> = HashSet::default();
             for i in std::iter::once(idx).chain(self.kids_neighbours(idx)) {
                 for t in self.kids_lead_titles(&guard, i, &used).into_iter().filter(|t| seen.insert(t.id)).take(PER_ROW) { lead.push(t); }
             }
@@ -134,7 +134,7 @@ impl<'a> PageContext<'a> {
         let e = &self.taxonomy.entries[idx];
         let guard = self.hnsw.read().await;
         let mut rows: Vec<Row> = Vec::new();
-        let mut used: HashSet<u32> = HashSet::new();
+        let mut used: HashSet<u32> = HashSet::default();
         for i in std::iter::once(idx).chain(self.kids_neighbours(idx)) {
             let items = self.kids_lead_titles(&guard, i, &used);
             if items.len() < 8 { continue; }

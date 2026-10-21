@@ -9,8 +9,8 @@ use std::{collections::HashMap, sync::{Arc, OnceLock}};
 static MARKS: OnceLock<HashMap<String, Value>> = OnceLock::new();
 
 fn load(db_path: &str) -> HashMap<String, Value> {
-    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::new() };
-    let Ok(text) = std::fs::read_to_string(dir.join("skip_marks.jsonl")) else { return HashMap::new() };
+    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::default() };
+    let Ok(text) = std::fs::read_to_string(dir.join("skip_marks.jsonl")) else { return HashMap::default() };
     text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect()
 }
 
@@ -49,8 +49,8 @@ pub async fn skip_marks(State(state): State<Arc<AppState>>, Query(q): Query<Mark
 static REASONS: OnceLock<HashMap<String, Value>> = OnceLock::new();
 
 fn load_reasons(db_path: &str) -> HashMap<String, Value> {
-    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::new() };
-    let Ok(text) = std::fs::read_to_string(dir.join("content_reasons.jsonl")) else { return HashMap::new() };
+    let Some(dir) = std::path::Path::new(db_path).parent() else { return HashMap::default() };
+    let Ok(text) = std::fs::read_to_string(dir.join("content_reasons.jsonl")) else { return HashMap::default() };
     text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| v.get("k").and_then(|k| k.as_str()).map(|k| (k.to_string(), v.clone()))).collect()
 }
 
