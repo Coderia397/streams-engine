@@ -1,0 +1,236 @@
+//! Rows made for one profile: Today's Top Picks, Gems, Because You Watched, More Like, Your Next Watch, My List, Continue Watching and New Releases.
+use super::*;
+
+const NEW_RELEASE_DAYS: i64 = 45;
+const GEM_MIN_RATING: f32 = 7.4;
+const GEM_MAX_POPULARITY: f32 = 30.0;
+
+/// A title is a gem when it is rated well by enough people but few have found it yet.
+pub fn is_gem(item: &CatalogItem) -> bool {
+    item.vote_average >= GEM_MIN_RATING && item.popularity < GEM_MAX_POPULARITY && item.vote_count >= 150
+}
+
+pub(crate) fn meta(key: &str, args: serde_json::Value, reason: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let mut m = json!({ "title_key": key, "title_args": args });
+    if let (Some(r), Some(obj)) = (reason, m.as_object_mut()) {
+        obj.insert("reason".to_string(), r);
+    }
+    Some(m)
+}
+
+impl<'a> PageContext<'a> {
+    /// A title of the profile's own lists (saved, recent): any surface rule and age rule of the page, but not the audience rule (a parent's list may hold children's titles).
+    pub(crate) fn personal_ok(&self, item: &CatalogItem) -> bool {
+        !item.adult
+            && (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
+            && self.genre_spec.is_none_or(|g| g.matches(item))
+            && self.maturity.is_none_or(|m| self.maturity_allows(m, item))
+            && (!crate::page::safety_nets() || self.allowed_by_nets(item))
+    }
+
+    pub(crate) fn vector_of(&self, key: u32) -> Option<Vec<f32>> {
+        let ix = self.vectors.index_of(key)?;
+        if self.vectors.is_zero_row(ix) {
+            return None;
+        }
+        Some(self.vectors.get_f32(ix))
+    }
+
+    /// The mean of the vectors of some titles, each with a weight, normalised; None when none has a vector.
+    pub(crate) fn taste_of(&self, parts: &[(u32, f32)]) -> Option<Vec<f32>> {
+        let mut sum = vec![0f32; DIMS];
+        let mut any = false;
+        for (key, w) in parts {
+            if let Some(v) = self.vector_of(*key) {
+                for (a, x) in sum.iter_mut().zip(&v) {
+                    *a += w * x;
+                }
+                any = true;
+            }
+        }
+        if !any {
+            return None;
+        }
+        l2_normalize(&mut sum);
+        Some(sum)
+    }
+
+    pub(crate) async fn neighbour_keys(&self, vec: &[f32], k: usize) -> Vec<u32> {
+        let guard = self.hnsw.read().await;
+        self.retrieve_sync(&guard, vec, k).into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// The titles from `keys` this page may show, ranked by closeness to `taste` plus a little quality, best first. `gems_only` keeps the hidden favourites.
+    pub(crate) fn rank_by_taste(&self, keys: &[u32], taken: &HashSet<u32>, taste: &[f32], gems_only: bool) -> Vec<&CatalogItem> {
+        let mut cands: Vec<(f32, &CatalogItem)> = self
+            .eligible(keys, taken, false)
+            .into_iter()
+            .filter(|i| !gems_only || is_gem(i))
+            .take(400)
+            .filter_map(|i| {
+                let v = self.vector_of(i.id)?;
+                Some((cosine_sim(taste, &v) + 0.25 * (crate::quality::item_quality(i) / 35.0).min(1.5), i))
+            })
+            .collect();
+        cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+        cands.into_iter().map(|c| c.1).collect()
+    }
+
+    /// The titles from `keys` without a taste (a profile with no history): quality order shaken per session.
+    pub(crate) fn rank_by_session(&self, keys: &[u32], taken: &HashSet<u32>, gems_only: bool, salt: usize) -> Vec<&CatalogItem> {
+        let mut cands: Vec<(f32, &CatalogItem)> = self
+            .eligible(keys, taken, false)
+            .into_iter()
+            .filter(|i| !gems_only || is_gem(i))
+            // up to 150 films and 150 series (series have larger popularity numbers and would fill the first 300 alone)
+            .scan((0usize, 0usize), |n, i| {
+                let slot = if i.media_type == "tv" { &mut n.1 } else { &mut n.0 };
+                *slot += 1;
+                Some((*slot <= 150).then_some(i))
+            })
+            .flatten()
+            .enumerate()
+            .map(|(rank, i)| (40.0 * entry_noise(self.session, salt + i.id as usize) - rank as f32, i))
+            .collect();
+        cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.id.cmp(&b.1.id)));
+        cands.into_iter().map(|c| c.1).collect()
+    }
+
+    pub(crate) fn list_row(&self, keys: &[u32], title: &str, archetype: &str, key: &str, reason: &str) -> Option<Row> {
+        let items: Vec<&CatalogItem> = keys.iter().filter_map(|k| self.catalog.get(k)).filter(|i| self.personal_ok(i)).take(15).collect();
+        if items.len() < 3 {
+            return None;
+        }
+        let mut r = self.row_of_any(title, "personal", &items)?;
+        r.archetype = archetype.to_string();
+        r.meta = meta(key, json!({}), Some(json!({ "kind": reason })));
+        Some(r)
+    }
+
+    /// A row about one title (its neighbours); the row title and its reason name that title.
+    pub(crate) async fn about_title_row(&self, anchor: &CatalogItem, taken: &HashSet<u32>, key: &str, kind: &str, title: String, archetype: &str) -> Option<Row> {
+        let v = self.vector_of(anchor.id)?;
+        let keys = self.neighbour_keys(&v, 400).await;
+        let mut taken = taken.clone();
+        taken.insert(anchor.id);
+        let ranked = self.rank_by_taste(&keys, &taken, &v, false);
+        let mut r = self.row_of(&title, "personal", &ranked)?;
+        r.archetype = archetype.to_string();
+        r.meta = meta(key, json!({ "title": anchor.title }), Some(json!({ "kind": kind, "title": anchor.title, "id": anchor.tmdb_id, "media_type": anchor.media_type })));
+        Some(r)
+    }
+
+    /// All personal rows of this page. `taken` holds the titles other rows of the page already use; discovery rows avoid them and avoid the profile's own titles.
+    pub(crate) async fn build_personal_rows(&self, taken: &HashSet<u32>) -> Vec<Row> {
+        let sig = self.signals;
+        let own: HashSet<u32> = sig.saved.iter().chain(&sig.recent).chain(&sig.liked).copied().collect();
+        let mut rows: Vec<Row> = Vec::new();
+        let on_home = self.genre.is_none() && self.language.is_none();
+        if on_home {
+            if let Some(r) = self.list_row(&sig.recent, "Continue Watching", "continue", "row.continue_watching", "continue") { rows.push(r); }
+            if let Some(r) = self.list_row(&sig.saved, "My List", "list", "row.my_list", "saved") { rows.push(r); }
+        }
+        let mut used: HashSet<u32> = taken.clone();
+        used.extend(own.iter().copied());
+        // titles of the profile in the order of use for anchors: the latest watched first, then liked, then saved
+        let anchors = |keys: &[u32], skip: &HashSet<u32>| -> Vec<&CatalogItem> {
+            keys.iter().filter(|k| !skip.contains(*k)).filter_map(|k| self.catalog.get(k)).filter(|i| self.personal_ok(i)).collect()
+        };
+        let mut anchor_used: HashSet<u32> = HashSet::default();
+        // Because You Watched <title>: up to two of the latest watched titles
+        for a in anchors(&sig.recent, &anchor_used).into_iter().take(2) {
+            anchor_used.insert(a.id);
+            if let Some(r) = self.about_title_row(a, &used, "row.because_you_watched", "because_you_watched", format!("Because You Watched {}", a.title), "byw").await {
+                r.items.iter().for_each(|i| { used.insert(i.id); });
+                rows.push(r);
+            }
+        }
+        // More Like <title>: a liked or saved title
+        let liked_first: Vec<u32> = sig.liked.iter().chain(&sig.saved).copied().collect();
+        if let Some(a) = anchors(&liked_first, &anchor_used).into_iter().next() {
+            anchor_used.insert(a.id);
+            if let Some(r) = self.about_title_row(a, &used, "row.more_like", "more_like", format!("More Like {}", a.title), "more_like").await {
+                r.items.iter().for_each(|i| { used.insert(i.id); });
+                rows.push(r);
+            }
+        }
+        // the profile's taste: recent titles weigh most, then liked, then saved; none of it for a new profile
+        let mut parts: Vec<(u32, f32)> = Vec::new();
+        for (n, k) in sig.recent.iter().take(8).enumerate() { parts.push((*k, 1.0 * 0.85f32.powi(n as i32))); }
+        for k in sig.liked.iter().take(10) { parts.push((*k, 1.2)); }
+        for k in sig.saved.iter().take(10) { parts.push((*k, 0.8)); }
+        let taste = self.taste_of(&parts);
+        // Today's Top Picks for You
+        let top = match &taste {
+            Some(t) => {
+                let keys = self.neighbour_keys(t, 800).await;
+                self.rank_by_taste(&keys, &used, t, false)
+            }
+            None => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(1500)], &used, false, 100_003)),
+        };
+        if let Some(mut r) = self.row_of("Today's Top Picks for You", "personal", &top) {
+            r.archetype = "top_picks".to_string();
+            r.meta = meta("row.todays_top_picks", json!({}), Some(json!({ "kind": if taste.is_some() { "taste" } else { "popular" } })));
+            r.items.iter().for_each(|i| { used.insert(i.id); });
+            rows.push(r);
+        }
+        // Your Next Watch: close to the latest watched titles
+        if let Some(t) = self.taste_of(&sig.recent.iter().take(3).map(|k| (*k, 1.0)).collect::<Vec<_>>()) {
+            let keys = self.neighbour_keys(&t, 600).await;
+            let ranked = self.rank_by_taste(&keys, &used, &t, false);
+            if let Some(mut r) = self.row_of("Your Next Watch", "personal", &ranked) {
+                r.archetype = "next_watch".to_string();
+                r.meta = meta("row.your_next_watch", json!({}), Some(json!({ "kind": "recent" })));
+                r.items.iter().for_each(|i| { used.insert(i.id); });
+                rows.push(r);
+            }
+        }
+        // We Think You'll Love These: near what the profile liked or saved (not what it watched last)
+        if on_home {
+            let taste_lk = self.taste_of(&sig.liked.iter().take(10).map(|k| (*k, 1.0)).chain(sig.saved.iter().take(10).map(|k| (*k, 0.8))).collect::<Vec<_>>());
+            if let Some(t) = taste_lk {
+                let keys = self.neighbour_keys(&t, 800).await;
+                let ranked = self.rank_by_taste(&keys, &used, &t, false);
+                if let Some(mut r) = self.row_of("We Think You'll Love These", "personal", &ranked) {
+                    r.archetype = "love_these".to_string();
+                    r.meta = meta("row.we_think_youll_love", json!({}), Some(json!({ "kind": "liked" })));
+                    r.items.iter().for_each(|i| { used.insert(i.id); });
+                    rows.push(r);
+                }
+            }
+            if let Some(r) = self.list_row(&sig.liked, "Familiar Favourites", "favourites", "row.familiar_favourites", "liked") { rows.push(r); }
+        }
+        // Gems for You: hidden favourites near the taste, or the best of them for a new profile
+        let gems = match &taste {
+            Some(t) => {
+                let keys = self.neighbour_keys(t, 2500).await;
+                self.rank_by_taste(&keys, &used, t, true)
+            }
+            None => blend_types(self.rank_by_session(self.catalog.gem_keys.as_slice(), &used, true, 200_017)),
+        };
+        if let Some(mut r) = self.row_of("Gems for You", "personal", &gems) {
+            r.archetype = "gems".to_string();
+            r.meta = meta("row.gems_for_you", json!({}), Some(json!({ "kind": if taste.is_some() { "taste" } else { "popular" } })));
+            rows.push(r);
+        }
+        rows
+    }
+
+    /// Titles that came out in the last weeks (the real release dates of fresh.json), best known first; None when fewer than six.
+    pub(crate) fn build_new_row(&self, taken: &HashSet<u32>) -> Option<Row> {
+        let today = crate::fresh::today_days();
+        let mut items: Vec<&CatalogItem> = self
+            .fresh
+            .items
+            .iter()
+            .filter(|f| crate::fresh::parse_days(&f.release_date).is_some_and(|d| (0..=NEW_RELEASE_DAYS).contains(&(today - d))))
+            .filter_map(|f| self.catalog.get(&crate::catalog::item_key(&f.media_type, f.id)))
+            .filter(|i| !taken.contains(&i.id) && self.matches_filters(i) && i.has_poster() && i.has_overview() && self.reliable(i))
+            .collect();
+        items.sort_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap_or(std::cmp::Ordering::Equal).then(a.id.cmp(&b.id)));
+        let mut r = self.row_of_any("New Releases", "new", &items)?;
+        r.archetype = "new".to_string();
+        r.meta = meta("row.new_releases", json!({}), None);
+        Some(r)
+    }
+}
