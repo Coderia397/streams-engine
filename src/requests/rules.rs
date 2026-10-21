@@ -56,6 +56,9 @@ pub struct Rules {
     pub keywords_none: Vec<String>,
     /// Shortest runtime in minutes; a title without a known runtime does not pass
     pub runtime_min: Option<u32>,
+    /// None of these networks (a preschool channel keeps a series out of the after-school tiers)
+    #[serde(default)]
+    pub networks_none: Vec<String>,
 }
 
 impl Rules {
@@ -112,6 +115,9 @@ impl Rules {
         if !self.networks_any.is_empty() && !it.networks.iter().any(|n| self.networks_any.contains(n)) {
             return false;
         }
+        if !self.networks_none.is_empty() && it.networks.iter().any(|n| self.networks_none.contains(n)) {
+            return false;
+        }
         if !self.keywords_any.is_empty() && !it.keywords.iter().any(|k| self.keywords_any.contains(k)) {
             return false;
         }
@@ -128,7 +134,7 @@ mod tests {
             id: 1, tmdb_id: 1, media_type: "movie".into(), title: "t".into(), release_year: Some(year), genres: genres.iter().map(|s| s.to_string()).collect(),
             overview: String::new(), tagline: None, director: None, poster_path: None, backdrop_path: None, vote_average: 7.0, popularity: 10.0, is_anime: anime,
             vote_count: 100, adult: false, original_language: lang.into(), tv_type: None, countries: countries.iter().map(|s| s.to_string()).collect(),
-            keywords: keywords.iter().map(|s| s.to_string()).collect(), cert: 0, cert_gb: 0, cert_us: 0, runtime: 100, flags: 0,
+            keywords: keywords.iter().map(|s| s.to_string()).collect(), cert: 0, cert_gb: 0, cert_us: 0, runtime: 100, networks: vec![], flags: 0,
         }
     }
 

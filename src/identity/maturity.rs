@@ -164,6 +164,7 @@ mod tests {
             countries: vec![],
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
             runtime: 0,
+            networks: vec![],
             flags,
             cert: 0, cert_gb: 0, cert_us: 0,
         }

@@ -138,6 +138,10 @@ impl GenreSpec {
             Awards(family) => it.keywords.iter().any(|k| k.strip_prefix("award:").is_some_and(|r| r.split(':').next() == Some(*family))),
             Tmdb(names) => has_genre(it, names),
             // For Little Kids (ages about 5 to 8): U rated animation or family titles that are not preschool ones (those are For Little Ones)
+            // For Little Ones: preschool television: TV-Y, or animation rated TV-G or U that runs 12 minutes or less, or the preschool words
+            Kids("for little ones") => it.cert_us == 6
+                || ((it.cert_us == 8 || it.cert == 1) && (1..=12).contains(&it.runtime) && has_genre(it, &["Animation"]))
+                || kids_rule("for little ones").is_some_and(|(_, kws, _)| kw_is(it, kws)),
             // For Little Kids: the preschool titles (41% of Netflix's page are also on For Little Ones) and short U rated animation or family films and specials
             Kids("little kids") => kids_rule("for little ones").is_some_and(|(_, kws, _)| kw_is(it, kws)) || (it.cert == 1 && has_genre(it, &["Animation", "Family", "Kids"]) && it.runtime > 0 && it.runtime <= 75),
             Kids(name) => kids_rule(name).is_some_and(|(_, kws, genres)| kw_is(it, kws) || (!genres.is_empty() && has_genre(it, genres))),

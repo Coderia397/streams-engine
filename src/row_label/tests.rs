@@ -83,7 +83,7 @@ mod name_fit_tests {
         CatalogItem {
             id: year as u32, tmdb_id: year as u32, media_type: "movie".into(), title: format!("T{year}"), release_year: Some(year), genres: genres.iter().map(|g| g.to_string()).collect(), overview: String::new(), tagline: None,
             director: None, poster_path: None, backdrop_path: None, vote_average: 7.0, popularity: 10.0, is_anime: false, vote_count: 100, adult: false, original_language: "en".into(), tv_type: None,
-            countries: vec![], keywords: vec![], cert: 0, cert_gb: 0, cert_us: 0, runtime: 100, flags: 0,
+            countries: vec![], keywords: vec![], cert: 0, cert_gb: 0, cert_us: 0, runtime: 100, networks: vec![], flags: 0,
         }
     }
 
