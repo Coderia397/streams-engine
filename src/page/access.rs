@@ -93,6 +93,11 @@ pub fn member_quality_for(spec: Option<&crate::genre_spec::GenreSpec>, item: &Ca
     }
 }
 
+/// Channels that make programmes for children: a series that ran on one is a children's series whatever its genres say (iCarly is a Comedy on TMDB).
+pub(crate) const KIDS_CHANNELS: &[&str] = &["Nickelodeon", "Nicktoons", "Nick Jr.", "Noggin", "Cartoon Network", "Boomerang", "Disney Channel", "Disney XD", "Disney Junior",
+    "Toon Disney", "Jetix", "Playhouse Disney", "CBBC", "CBeebies", "CITV", "Milkshake!", "PBS Kids", "Kids' WB", "Fox Kids", "Teletoon", "YTV", "Treehouse TV", "Discovery Kids",
+    "Universal Kids", "Sprout", "ABC Kids", "Pop", "Tiny Pop", "Cartoonito", "Boing", "Gulli", "Super RTL", "KiKA", "Canal J", "Clan", "Rai Yoyo", "Rai Gulp", "Nickelodeon Junior"];
+
 impl<'a> PageContext<'a> {
     /// A title this page may show in a row made from a request or a group: the page's filters, its quality gate and its vote floor (also served by /api/check/page-pool).
     pub fn page_pool_member(&self, item: &CatalogItem) -> bool {
@@ -168,7 +173,11 @@ impl<'a> PageContext<'a> {
     /// A title made for children (TMDB Kids genre, or a US TV-Y or TV-Y7 rating): on a page that is not a child's it stays out of the personal rows, the popular row and
     /// the composed rows that are not about children or animation (Miraculous next to Breaking Bad in Top Picks, iCarly next to The Boys in US Series).
     pub(crate) fn childrens_title(&self, item: &CatalogItem) -> bool {
-        item.genres.iter().any(|g| g == "Kids") || matches!(item.cert_us, 6 | 7)
+        item.genres.iter().any(|g| g == "Kids")
+            || matches!(item.cert_us, 6 | 7)
+            || item.networks.iter().any(|n| KIDS_CHANNELS.contains(&n.as_str()))
+            // an animated series rated U in Britain with no US rating (Chibi Maruko-chan) is a children's series
+            || (item.media_type == "tv" && item.cert_us == 0 && item.cert_gb == 1 && item.genres.iter().any(|g| g == "Animation"))
     }
 
     /// The quality gate of this page (see `member_quality_for`).

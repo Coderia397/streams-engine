@@ -148,6 +148,8 @@ impl<'a> PageContext<'a> {
     fn request_score(&self, r: &Request, taste: Option<&[f32]>) -> f32 {
         let prior = match r.def.kind.as_str() {
             "calendar" => 1.0,
+            // an animation tier row (note 103) is curated by audience and rhythm: it leads like a calendar row
+            "tier" => 0.95,
             "theme" => 0.8,
             "origin" | "mood" => 0.7,
             _ => 0.6,
@@ -200,7 +202,11 @@ impl<'a> PageContext<'a> {
             .requests
             .requests
             .iter()
-            .filter(|r| self.request_applies(r))
+            .filter(|r| {
+                let ok = self.request_applies(r);
+                if r.def.kind == "tier" { tracing::debug!("tier row {} applies on {} kids={}: {} (anchor {}, owner {}, profile {:?})", r.def.name, self.surface, self.is_kids(), ok, !r.anchor.is_empty(), r.owner_surface, r.def.profile); }
+                ok
+            })
             .filter_map(|r| {
                 let mut score = self.request_score(r, taste.as_deref());
                 if genre_page {
@@ -248,7 +254,9 @@ impl<'a> PageContext<'a> {
             }
             // rows of one genre page all lean the genre's way, so two of them may sit closer than two rows of Home
             let max_sim = if self.genre_spec.is_some() { REQUEST_MAX_ANCHOR_SIM_GENRE } else { REQUEST_MAX_ANCHOR_SIM };
-            if placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim) || !names.insert(req.def.name.to_lowercase()) {
+            // tier rows (note 103) are told apart by facts, not by their centres: every cartoon tier sits in the same corner of the vector space
+            let alike = req.def.kind != "tier" && placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim);
+            if alike || !names.insert(req.def.name.to_lowercase()) {
                 continue;
             }
             let Some(mut row) = self.request_row(req, &taken) else { continue };
@@ -285,6 +293,9 @@ impl<'a> PageContext<'a> {
             .filter(|i| !taken.contains(&i.id) && self.page_pool_member(i) && (keep_children || !self.childrens_title(i)))
             .take(look)
             .collect();
+        if req.def.kind == "tier" {
+            tracing::debug!("tier row {}: members {}, eligible {} (kids page {})", req.def.name, req.members.len(), eligible.len(), self.is_kids());
+        }
         if eligible.len() < min_items {
             return None;
         }
@@ -359,6 +370,9 @@ impl<'a> PageContext<'a> {
         }
         let row_catalog: Vec<&CatalogItem> = items.iter().filter_map(|i| self.catalog.get(&i.id)).collect();
         if !crate::row_label::name_fits(&req.def.name, &row_catalog) {
+            if req.def.kind == "tier" {
+                tracing::debug!("tier row {}: name does not fit its {} titles", req.def.name, row_catalog.len());
+            }
             return None;
         }
         Some(Row {

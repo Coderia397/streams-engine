@@ -166,6 +166,19 @@ impl RequestStore {
                         n += 1;
                     }
                 }
+                // children's cartoons rarely reach the quality gate (few votes): a row with no quality member takes its centre from its first members instead
+                if n == 0 {
+                    for it in members.iter().take(400) {
+                        if let Some(ix) = vectors.index_of(it.id) {
+                            let mut c: Vec<f32> = vectors.get_f32(ix).iter().zip(mean).map(|(x, m)| x - m).collect();
+                            l2_normalize(&mut c);
+                            for (a, x) in anchor.iter_mut().zip(&c) {
+                                *a += x;
+                            }
+                            n += 1;
+                        }
+                    }
+                }
                 if n > 0 {
                     l2_normalize(&mut anchor);
                 } else {
