@@ -12,6 +12,17 @@ pub(crate) fn genre_key(g: &str) -> &str {
     }
 }
 
+/// One name for a genre whatever TMDB calls it on films and on series ("Sci-Fi & Fantasy" and "Science Fiction" are one family, "Action & Adventure" and "Action" too).
+pub fn genre_family(g: &str) -> &str {
+    match g {
+        "Action & Adventure" | "Adventure" => "Action",
+        "Sci-Fi & Fantasy" | "Fantasy" => "Science Fiction",
+        "War & Politics" => "War",
+        "Kids" => "Family",
+        other => other,
+    }
+}
+
 /// The title ready noun of a genre as TMDB names it ("Science Fiction" gives "Sci-Fi"). None for genres that do not make a row name.
 pub fn genre_noun(g: &str) -> Option<&'static str> {
     noun(genre_key(g))

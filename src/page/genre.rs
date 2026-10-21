@@ -402,7 +402,8 @@ impl<'a> PageContext<'a> {
             if let Some(n) = group_name {
                 if crate::row_label::name_fits(&n, &row_catalog) && !entry_names_other_kind(&n, self.surface) { candidates.insert(0, n); }
             }
-            let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
+            let fallback = self.genre.map_or_else(|| "More to Explore".to_string(), |g| format!("More {g}"));
+            let candidates = keep_promises(crate::row_label::mark_animated(candidates, &row_catalog), &row_catalog, &fallback);
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 6);
         }

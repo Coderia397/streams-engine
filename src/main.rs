@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/rating",          get(routes::rating::rating))
         .route("/api/ratings",         get(routes::rating::ratings))
         .route("/api/health",          get(routes::health::health))
+        .route("/api/check/page-pool", get(routes::check::page_pool))
         .layer(axum::middleware::from_fn_with_state(state.clone(), streams_engine::guard::guard))
         .layer(streams_engine::guard::cors())
         .with_state(state);

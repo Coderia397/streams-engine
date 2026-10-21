@@ -1,3 +1,4 @@
+pub mod check;
 pub mod feed;
 pub mod feedback;
 pub mod genres;

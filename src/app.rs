@@ -39,6 +39,8 @@ pub struct AppState {
     /// Corpus mean vector, for centred cosine scoring of taxonomy rows
     pub mean:       Arc<Vec<f32>>,
     pub sessions:   crate::sessions::SessionStore,
+    /// Requests the pages make rows from when `STREAMS_REQUEST_ROWS=1` (see requests/)
+    pub requests:   Arc<crate::requests::RequestStore>,
     /// Supabase token verification; none when SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY is missing (every request anonymous)
     pub identity:   Option<Arc<crate::identity::Identity>>,
     /// Kept for FTS search route
@@ -125,6 +127,8 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         t.center_with(&mean);
     }
     tracing::info!("Kids row vocabulary: {} entries", taxonomy_kids.entries.len());
+    // the rows the engine may make from requests (note 96); empty without requests_v1.json
+    let requests = Arc::new(crate::requests::RequestStore::load(&config.db_path, &catalog.load(), &vectors, &mean));
 
     // HNSW index: loaded from disk, or built in the background (brute force serves until it is ready)
     let hnsw_slot: Arc<RwLock<Option<HnswIndex>>> = Arc::new(RwLock::new(None));
@@ -179,6 +183,7 @@ pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
         feed_cache,
         mean,
         sessions: crate::sessions::SessionStore::new(),
+        requests,
         identity: crate::identity::Identity::from_env(),
         config,
     });

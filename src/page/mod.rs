@@ -10,6 +10,7 @@ mod genre;
 mod kids_collections;
 mod moods;
 mod names;
+mod requests;
 mod retrieval;
 mod stats;
 mod tuning;

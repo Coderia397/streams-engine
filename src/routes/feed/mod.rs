@@ -86,7 +86,7 @@ async fn build_page_body(state: &AppState, req: &FeedRequest, session: &SessionV
         None => (ctx.build_page().await, None),
     };
     let page_rows = removed::without_removed(page_rows, &state.config.db_path);
-    let all_rows = render::to_client_rows(page_rows, &session.seen, &state.profiles, &fresh);
+    let all_rows = render::to_client_rows(page_rows, &session.seen, &state.profiles, &fresh, &catalog);
     let has_more = all_rows.len() > req.offset + req.per_page && req.offset + req.per_page < plan.cap;
     let rows: Vec<serde_json::Value> = all_rows.into_iter().skip(req.offset).take(req.per_page).collect();
     let response = json!({

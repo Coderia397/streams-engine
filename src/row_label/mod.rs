@@ -20,7 +20,7 @@ mod words;
 
 pub use fit::name_fits;
 pub use titles::{candidates, mark_animated, theme_title, tone_title};
-pub use words::{genre_noun, language_label, primary_country};
+pub use words::{genre_family, genre_noun, language_label, primary_country};
 pub(crate) use themes::THEMES;
 pub(crate) use words::*;
 

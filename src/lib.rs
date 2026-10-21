@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod personal;
 pub mod profiles;
 pub mod quality;
+pub mod requests;
 pub mod routes;
 pub mod signals;
 pub mod sessions;

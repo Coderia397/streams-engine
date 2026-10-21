@@ -5,6 +5,9 @@
 //! source of rows, write a layer and put one line in `build_page_rows`; to remove one, delete its line.
 use super::*;
 
+/// A page made from requests needs this many request rows, else it is built the older way.
+const REQUEST_PAGE_MIN_ROWS: usize = 8;
+
 /// The ids of the titles already in a row of the page.
 fn taken_ids(rows: &[Row]) -> HashSet<u32> {
     rows.iter().flat_map(|r| r.items.iter().map(|i| i.id)).collect()
@@ -49,23 +52,33 @@ impl<'a> PageContext<'a> {
 
     /// The rows of the page, layer by layer.
     pub(crate) async fn build_page_rows(&self) -> Vec<Row> {
-        let mut rows = self.build_page_rows_inner().await;
-        self.layer_season(&mut rows).await;
+        // with request rows on, the topic rows of the page come from requests (page/requests.rs); a genre page that gets too few falls back to its own builder
+        let by_request = self.request_page();
+        let mut rows = if by_request { self.build_request_page() } else { Vec::new() };
+        let by_request = by_request && rows.iter().filter(|r| r.archetype != "trending").count() >= REQUEST_PAGE_MIN_ROWS;
+        if !by_request {
+            rows = self.build_page_rows_inner().await;
+        }
+        self.layer_season(&mut rows, by_request).await;
         self.layer_kids_banners(&mut rows).await;
-        self.layer_feel(&mut rows);
+        if by_request { self.layer_night(&mut rows) } else { self.layer_feel(&mut rows) }
         self.layer_personal(&mut rows).await;
         self.layer_hygiene(&mut rows);
         rows
     }
 
     /// Collection banners (an event, a mood) and up to two seasonal rows (from the row vocabulary, only inside their calendar window) near the top of the home, films and series pages.
-    async fn layer_season(&self, rows: &mut Vec<Row>) {
+    async fn layer_season(&self, rows: &mut Vec<Row>, by_request: bool) {
         if !(self.is_plain_page() && !self.is_kids() && !self.taxonomy.entries.is_empty()) {
             return;
         }
         // the collection rows (an event's banner, a mood) are built first so the seasonal rows take what is left
         let collections = self.build_collection_rows(&taken_ids(rows), 4);
         rows.extend(collections);
+        // a page made from requests has its seasonal rows already (calendar requests)
+        if by_request {
+            return;
+        }
         let used = taken_ids(rows);
         let titles = lower_titles(rows);
         // sub groups of the season's pool when they exist, the flat keyword rows otherwise
@@ -125,6 +138,15 @@ impl<'a> PageContext<'a> {
             let moods: Vec<Row> = self.build_mood_rows(&taken_ids(rows), 3, false).into_iter().filter(|r| !on_page.contains(&r.title.to_lowercase())).take(1).collect();
             interleave(rows, moods, 8);
         }
+    }
+
+    /// A night page made from requests leads with two late night mood rows.
+    fn layer_night(&self, rows: &mut Vec<Row>) {
+        if !(self.late_night && self.genre.is_none()) {
+            return;
+        }
+        let moods = self.build_mood_rows(&taken_ids(rows), 2, true);
+        interleave(rows, moods, 1);
     }
 
     /// Personal rows, New Releases and collections: added here, placed by slot in `place_charts`.

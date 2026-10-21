@@ -51,6 +51,8 @@ pub struct PageContext<'a> {
     pub skip:        Option<&'a HashSet<u32>>,
     /// What the client sent about the profile: saved, recent and liked titles (personal rows)
     pub signals:     &'a crate::signals::Signals,
+    /// Requests rows are made from (empty, or unused while the switch is off)
+    pub requests:    &'a crate::requests::RequestStore,
 }
 
 /// The part of a page context that comes from the request; the rest is the engine's loaded data (`PageContext::new`).
@@ -105,6 +107,7 @@ impl<'a> PageContext<'a> {
             fill_pool: None,
             skip: None,
             signals: ask.signals,
+            requests: &state.requests,
         }
     }
 }

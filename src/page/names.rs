@@ -2,6 +2,14 @@
 use super::*;
 
 /// Significant words of a title (3 or more letters, not a number, not a filler word), lower case, without repeats.
+/// The candidate names of a row that keep their promise for its titles (genre, nationality and decade words, see row_label::name_fits), in order; the fallback, which
+/// promises nothing but the page itself, when none does. A derived name such as "Documentary & Animation" over one animated title out of fifteen is never shown.
+pub(crate) fn keep_promises(candidates: Vec<String>, items: &[&CatalogItem], fallback: &str) -> Vec<String> {
+    let mut kept: Vec<String> = candidates.into_iter().filter(|c| crate::row_label::name_fits(c, items)).collect();
+    kept.push(fallback.to_string());
+    kept
+}
+
 pub(crate) fn title_words(title: &str) -> Vec<String> {
     const FILLER: &[&str] = &[
         "the", "and", "for", "you", "your", "with", "from", "that", "this", "are", "was", "not", "but", "his", "her", "its", "our",

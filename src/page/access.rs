@@ -94,6 +94,11 @@ pub fn member_quality_for(spec: Option<&crate::genre_spec::GenreSpec>, item: &Ca
 }
 
 impl<'a> PageContext<'a> {
+    /// A title this page may show in a row made from a request or a group: the page's filters, its quality gate and its vote floor (also served by /api/check/page-pool).
+    pub fn page_pool_member(&self, item: &CatalogItem) -> bool {
+        self.matches_filters(item) && self.member_ok(item) && self.reliable(item)
+    }
+
     pub(crate) fn matches_filters(&self, item: &CatalogItem) -> bool {
         (self.surface == "both" || item.media_type == self.surface || item.media_type == "both")
             && self.language.is_none_or(|l| language_matches(l, &item.original_language))

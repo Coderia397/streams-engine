@@ -272,7 +272,7 @@ impl<'a> PageContext<'a> {
             }
             candidates.extend(crate::row_label::candidates(&row_catalog));
             candidates.extend(derived);
-            let candidates = crate::row_label::mark_animated(candidates, &row_catalog);
+            let candidates = keep_promises(crate::row_label::mark_animated(candidates, &row_catalog), &row_catalog, "More to Explore");
             let title = state.claim_title(&candidates);
             rows[row_idx].title = clamp_words(&title, 6);
         }
