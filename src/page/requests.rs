@@ -179,7 +179,7 @@ impl<'a> PageContext<'a> {
     }
 
     /// The vector of a title centred on the corpus mean, unit length.
-    fn centred_vector(&self, ix: usize) -> Vec<f32> {
+    pub(crate) fn centred_vector(&self, ix: usize) -> Vec<f32> {
         let mut c: Vec<f32> = self.vectors.get_f32(ix).iter().zip(self.mean).map(|(x, m)| x - m).collect();
         l2_normalize(&mut c);
         c
@@ -307,10 +307,10 @@ impl<'a> PageContext<'a> {
                     let share = if own_event {
                         0.02 * noise
                     } else if let Some(p) = req.def.position_share {
-                        crate::page::rhythm::jittered(crate::page::rhythm::Quart { median: p.median, p25: p.p25, p75: p.p75, n: p.instances }, noise)
+                        crate::page::rhythm::placed(kids, self.surface, has_genre, crate::page::rhythm::Quart { median: p.median, p25: p.p25, p75: p.p75, n: p.instances }, noise)
                     } else {
                         let family = if req.def.kind == "mood" { "mood" } else { match family_of(req) { "award" => "award", "place" => "place", _ => "topic" } };
-                        crate::page::rhythm::family_position(kids, self.surface, has_genre, family).map_or(0.5 + 0.3 * (noise - 0.5), |q| crate::page::rhythm::jittered(q, noise))
+                        crate::page::rhythm::family_position(kids, self.surface, has_genre, family).map_or(0.5 + 0.3 * (noise - 0.5), |q| crate::page::rhythm::placed(kids, self.surface, has_genre, q, noise))
                     };
                     (share, i)
                 })

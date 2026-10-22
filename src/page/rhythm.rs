@@ -58,10 +58,25 @@ pub struct Transitions {
     pub same_family_adjacent: f32,
 }
 
+/// What two visits of the same page say (the captures of one profile and page in two rounds): the move of a returning row (position share) is the width of the
+/// engine's session noise around a row's learned position
+#[derive(Debug, Clone, Deserialize)]
+pub struct Visits {
+    #[serde(default)]
+    pub pairs: usize,
+    pub move_share: Option<Quart>,
+    #[serde(default)]
+    pub names_kept: Option<f32>,
+    #[serde(default)]
+    pub first_screen_kept: Option<f32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Kind {
     pub instances: usize,
     pub rows: Quart,
+    #[serde(default)]
+    pub visits: Option<Visits>,
     #[serde(default)]
     pub pages: HashMap<String, PageRows>,
     #[serde(default)]
@@ -172,4 +187,18 @@ pub fn spreads_genres(kids: bool, surface: &str, has_genre: bool) -> Option<bool
 pub fn jittered(q: Quart, noise: f32) -> f32 {
     let x = if noise < 0.5 { q.p25 + (q.median - q.p25) * (noise / 0.5) } else { q.median + (q.p75 - q.median) * ((noise - 0.5) / 0.5) };
     x.clamp(0.0, 1.0)
+}
+
+/// How far a row moves between two visits of a page of this kind (position share, the captures' median), when the captures hold two visits.
+pub fn visit_move(kids: bool, surface: &str, has_genre: bool) -> Option<f32> {
+    kind(kids, surface, has_genre)?.visits.as_ref()?.move_share.map(|q| q.median)
+}
+
+/// A position share moved by a session's noise the way a row moves between two visits: the median plus or minus the measured move (the quartile window when the
+/// captures hold no second visit of this kind).
+pub fn placed(kids: bool, surface: &str, has_genre: bool, q: Quart, noise: f32) -> f32 {
+    match visit_move(kids, surface, has_genre) {
+        Some(m) if m > 0.0 => (q.median + (noise - 0.5) * 2.0 * m).clamp(0.0, 1.0),
+        _ => jittered(q, noise),
+    }
 }

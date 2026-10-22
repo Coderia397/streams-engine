@@ -32,7 +32,7 @@ impl<'a> PageContext<'a> {
         let learned = |archetype: &str, salt: usize| -> Option<usize> {
             let name = match archetype { "trending" => "chart", "byw" | "more_like" => "more_like", other => other };
             let q = crate::page::rhythm::archetype_position(kids, self.surface, has_genre, name)?;
-            let share = crate::page::rhythm::jittered(q, entry_noise(self.session, 9_000 + salt));
+            let share = crate::page::rhythm::placed(kids, self.surface, has_genre, q, entry_noise(self.session, 9_000 + salt));
             Some((share * total.saturating_sub(1) as f32).round() as usize)
         };
         // (slot, learned, row): a learned place is jittered already (inside its quartiles); a slot constant takes the window of its kind below
