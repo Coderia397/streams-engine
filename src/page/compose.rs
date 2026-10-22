@@ -171,7 +171,9 @@ impl<'a> PageContext<'a> {
         }
         // composed rows share titles past their first screens, so personal rows avoid only what the first screens show
         let taken_now = if composed { first_screen_ids(rows) } else { taken_ids(rows) };
-        let mut extra = self.build_personal_rows(&taken_now).await;
+        // on a genre page the personal rows choose among the page's own titles (note 107)
+        let scope = self.page_scope(rows);
+        let mut extra = self.build_personal_rows(&taken_now, scope.as_ref()).await;
         if self.genre.is_none() || composed {
             let mut taken_all = taken_now;
             extra.iter().for_each(|r| r.items.iter().for_each(|i| { taken_all.insert(i.id); }));

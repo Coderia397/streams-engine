@@ -106,8 +106,20 @@ pub fn same_genre(a: &str, b: &str) -> bool {
     }
     a.eq_ignore_ascii_case(b) || matches!((family(a), family(b)), (Some(x), Some(y)) if x == y)
 }
+/// A keyword holding one of the words at the start of one of its words ("romance" in "teenage romance", not in "bromance"; "sport" in "sports car", not in
+/// "passport").
 fn kw_has(it: &CatalogItem, parts: &[&str]) -> bool {
-    it.keywords.iter().any(|k| parts.iter().any(|p| k.contains(p)))
+    it.keywords.iter().any(|k| parts.iter().any(|p| starts_a_word(k, p)))
+}
+fn starts_a_word(k: &str, p: &str) -> bool {
+    k.match_indices(p).any(|(i, _)| i == 0 || !k.as_bytes()[i - 1].is_ascii_alphanumeric())
+}
+/// Membership learned from Netflix's own page for this genre and the title's media type (`genre_signals_v1.json`, catalog/overlays.rs); None when it is not loaded.
+fn learned(it: &CatalogItem, genre: &str) -> Option<bool> {
+    crate::catalog::genre_learned(&it.media_type, genre).then(|| {
+        let mark = format!("learned:{}", genre.to_lowercase());
+        it.keywords.iter().any(|k| *k == mark)
+    })
 }
 fn from_country(it: &CatalogItem, codes: &[&str]) -> bool {
     it.countries.iter().any(|c| codes.contains(&c.as_str()))
@@ -187,11 +199,11 @@ impl GenreSpec {
             ),
             European => from_country(it, EUROPE) && !from_country(it, &["US", "GB"]),
             Halloween => kw_has(it, &["halloween"]) || (it.media_type == "tv" && crate::events::title_belongs("halloween", it)),
-            // TMDB has no Horror or Romance genre for TV, so series are found through keywords
+            // TMDB has no Horror or Romance genre for TV, so series are found by what Netflix's own pages teach (learned), else through keywords
             Horror => has_genre(it, &["Horror"])
                 || (it.media_type == "tv"
-                    && kw_has(it, &["horror", "slasher", "zombie", "haunted", "ghost", "vampire", "demon"])),
-            Romance => has_genre(it, &["Romance"]) || (it.media_type == "tv" && kw_has(it, &["romance", "romantic"])),
+                    && learned(it, "Horror").unwrap_or_else(|| kw_has(it, &["horror", "slasher", "zombie", "haunted", "ghost", "vampire", "demon"]))),
+            Romance => has_genre(it, &["Romance"]) || (it.media_type == "tv" && learned(it, "Romance").unwrap_or_else(|| kw_has(it, &["romance", "romantic"]))),
             Independent => kw_is(
                 it,
                 &["independent film", "indie film", "indie", "independent cinema", "low budget", "micro budget", "no budget",
@@ -218,7 +230,7 @@ impl GenreSpec {
             ),
             StandUp => kw_has(it, &["stand-up comedy", "stand-up comedian", "stand-up special", "stand up comedy"]),
             ChatShows => StandUp.matches(it) || it.tv_type.as_deref() == Some("Talk Show"),
-            Teen => kw_has(it, &["high school", "teen", "coming of age"]),
+            Teen => learned(it, "Teen").unwrap_or_else(|| kw_has(it, &["high school", "teen", "coming of age"])),
             Us => if it.media_type == "tv" {
                 from_country(it, &["US"])
             } else {
@@ -437,6 +449,11 @@ mod tests {
         let mut h = item("tv"); h.keywords = vec!["zombie".into()]; assert!(resolve("Horror", "tv").matches(&h));
         let mut hm = item("movie"); hm.keywords = vec!["zombie".into()]; assert!(!resolve("Horror", "movie").matches(&hm), "movies use the genre");
         let mut r = item("tv"); r.keywords = vec!["romance".into()]; assert!(resolve("Romance", "tv").matches(&r));
+        // a keyword word must start where the rule's word starts (note 107: bromance made Jujutsu Kaisen a romance)
+        r.keywords = vec!["bromance".into()]; assert!(!resolve("Romance", "tv").matches(&r));
+        r.keywords = vec!["teenage romance".into()]; assert!(resolve("Romance", "tv").matches(&r));
+        let mut p = item("movie"); p.keywords = vec!["passport".into()]; assert!(!kw_has(&p, &["sport"]));
+        p.keywords = vec!["sports car".into()]; assert!(kw_has(&p, &["sport"]));
         let mut s = item("movie"); s.runtime = 25; assert!(resolve("Shorts", "movie").matches(&s));
         s.runtime = 120; assert!(!resolve("Shorts", "movie").matches(&s));
         let mut l = item("movie"); l.keywords = vec!["gay theme".into()]; assert!(resolve("LGBTQ", "movie").matches(&l));

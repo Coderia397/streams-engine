@@ -20,7 +20,7 @@ pub use index::*;
 pub use item::*;
 pub use keys::*;
 pub use load::{load_catalog, make_shared_catalog};
-pub use overlays::{CATEGORIES_LOADED, POPULARITY_ASOF};
+pub use overlays::{genre_learned, CATEGORIES_LOADED, POPULARITY_ASOF};
 pub use refresh::spawn_catalog_refresh;
 pub(crate) use overlays::*;
 
