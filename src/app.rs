@@ -75,6 +75,7 @@ fn open_index_file(config: &Config, stamp: &str) -> Option<HnswIndex> {
 /// The loads that do not depend on each other run in parallel threads (first the files and tables, then what needs the catalog or the vectors).
 pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let db = config.db_path.as_str();
+    crate::events::load(db);
     let profile_dir = std::path::Path::new(db).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let stamp = vectors_stamp(&config.vectors_path);
 

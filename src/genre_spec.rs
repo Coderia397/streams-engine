@@ -42,6 +42,8 @@ pub enum GenreSpec {
     StandUp,
     ChatShows,
     Teen,
+    /// The page of a calendar event (`events_v1.json`: Christmas, Valentine's Day ...), offered in its window; a title belongs by the event's keywords
+    Event(String),
     /// Hollywood films (US, widely rated) and US series
     Us,
     /// A page of the Kids menus (genre_pages::KIDS_*): the rule is read from `kids_rule` by the page's lower case name
@@ -97,8 +99,13 @@ fn from_country(it: &CatalogItem, codes: &[&str]) -> bool {
 
 impl GenreSpec {
     /// The calendar event this page is the page of (the collection banner of Home leads here), if it is one.
-    pub fn event_id(&self) -> Option<&'static str> {
-        match self { GenreSpec::Halloween => Some("halloween"), _ => None }
+    pub fn event_id(&self) -> Option<&str> {
+        match self { GenreSpec::Halloween => Some("halloween"), GenreSpec::Lgbtq => Some("pride"), GenreSpec::Event(e) => Some(e.as_str()), _ => None }
+    }
+
+    /// Whether the page is offered today: an event page in its window only, every other page always.
+    pub fn in_season(&self) -> bool {
+        match self { GenreSpec::Event(e) => crate::events::in_season(e), _ => true }
     }
 }
 
@@ -107,7 +114,7 @@ impl GenreSpec {
     /// kids, family or teens keep them; a page for any other genre (Action, Thriller, Pride) is for adults and teens.
     pub fn keeps_children(&self) -> bool {
         match self {
-            GenreSpec::Any | GenreSpec::Anime | GenreSpec::Teen | GenreSpec::Unsupported => true,
+            GenreSpec::Any | GenreSpec::Anime | GenreSpec::Teen | GenreSpec::Unsupported | GenreSpec::Event(_) => true,
             GenreSpec::Tmdb(names) => names.iter().any(|n| matches!(n.to_ascii_lowercase().as_str(), "kids" | "family" | "animation")),
             GenreSpec::Name(n) => matches!(n.to_ascii_lowercase().as_str(), "kids" | "family" | "animation" | "kids & family"),
             _ => false,
@@ -180,6 +187,7 @@ impl GenreSpec {
             }),
             Musical => has_genre(it, &["Music"]) || kw_has(it, &["musical"]),
             Reality => has_genre(it, &["Reality"]) || it.tv_type.as_deref() == Some("Reality"),
+            Event(e) => crate::events::title_belongs(e, it),
             ScienceNature => has_genre(it, &["Documentary"])
                 && kw_has(it, &["nature", "wildlife", "animal", "science", "space", "ocean", "planet", "universe", "dinosaur",
                                 "environment", "biology", "physics", "climate"]),
@@ -339,11 +347,27 @@ fn by_id(id: u32, surface: &str) -> Option<&'static str> {
 pub fn resolve(raw: &str, surface: &str) -> GenreSpec {
     let t = raw.trim();
     let key = if let Ok(id) = t.parse::<u32>() {
-        match by_id(id, surface) { Some(k) => k.to_string(), None => return GenreSpec::Name(t.to_string()) }
+        match by_id(id, surface) {
+            Some(k) => k.to_string(),
+            None => {
+                // the page of an event: its id (10101 up); Halloween and Pride are genre pages too and resolve above
+                if let Some(ev) = crate::genre_pages::event_of_page(id).filter(|ev| crate::events::get(ev).is_some()) {
+                    return GenreSpec::Event(ev.to_string());
+                }
+                return GenreSpec::Name(t.to_string());
+            }
+        }
     } else {
         t.to_lowercase().replace(" and ", " & ").split_whitespace().collect::<Vec<_>>().join(" ")
     };
-    by_name(&key).unwrap_or_else(|| GenreSpec::Name(t.to_string()))
+    if let Some(spec) = by_name(&key) {
+        return spec;
+    }
+    // an event by its id (`christmas`) or its label ("Christmas", "Valentine's Day")
+    if let Some(e) = crate::events::get(&key).or_else(|| crate::events::by_label(&key)) {
+        return GenreSpec::Event(e.id.clone());
+    }
+    GenreSpec::Name(t.to_string())
 }
 
 #[cfg(test)]

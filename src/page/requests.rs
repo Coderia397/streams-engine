@@ -47,6 +47,8 @@ const KID_MOODS: &[&str] = &["Feel-Good", "Heartfelt", "Goofy", "Quirky", "Imagi
 
 /// Genres a row may be named for on a child's page.
 const KID_GENRES: &[&str] = &["Animation", "Family", "Adventure", "Comedy", "Fantasy", "Kids", "Science Fiction", "Music", "Action", "Documentary", "Reality", "Mystery"];
+/// On the page of an event, a row composed for that event scores this much more than a row the scope only cuts.
+const EVENT_PAGE_OWN_ROW: f32 = 0.8;
 /// On a genre page a composed row needs this share of its titles inside the page, unless its own rules name the page's genre.
 const GENRE_PAGE_MIN_SHARE: f32 = 0.15;
 /// Or this many of its first REQUEST_LOOK titles inside the page.
@@ -192,7 +194,8 @@ impl<'a> PageContext<'a> {
         // rows keep their names and the page's rule keeps the titles (as Netflix's Black Stories page carries Crime Drama Series and Comedies)
         let genre_like = |spec: &crate::genre_spec::GenreSpec| {
             use crate::genre_spec::GenreSpec::*;
-            matches!(spec, Tmdb(_) | Thriller | Horror | Romance | Anime | Reality | Musical | Teen | Name(_))
+            // a child's Reality page is a scope over the children's rows (Netflix fills it with Funny, Good Vibes Only, Watch with the Family cut to reality shows)
+            matches!(spec, Tmdb(_) | Thriller | Horror | Romance | Anime | Musical | Teen | Name(_)) || (matches!(spec, Reality) && !self.is_kids())
         };
         let genre_page = composed && self.genre_spec.is_some_and(genre_like);
         let names_genre = |r: &Request| -> bool {
@@ -217,6 +220,12 @@ impl<'a> PageContext<'a> {
                         return None;
                     }
                     score += 0.8 * share + if names_genre(r) { 0.4 } else { 0.0 };
+                }
+                // on the page of an event (Christmas, Halloween) the rows composed for that event lead the rows the scope merely cuts
+                if let Some(ev) = self.genre_spec.and_then(|s| s.event_id()) {
+                    if r.def.blocks.iter().any(|b| b.bucket == "event" && b.token == ev) {
+                        score += EVENT_PAGE_OWN_ROW;
+                    }
                 }
                 Some((score, r))
             })

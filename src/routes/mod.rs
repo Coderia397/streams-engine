@@ -4,6 +4,7 @@ pub mod feedback;
 pub mod genres;
 pub mod health;
 pub mod new_popular;
+pub mod characters;
 pub mod rating;
 pub mod hero;
 pub mod marks;

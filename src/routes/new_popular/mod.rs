@@ -20,9 +20,12 @@ use candidates::*;
 use charts::*;
 use rows::*;
 
-const ROW_TITLES: usize = 15;
+/// Netflix's New on Netflix and Worth the Wait hold 40 titles (note 97)
+const ROW_TITLES: usize = 40;
 const MIN_ROW_ITEMS: usize = 6;
-const DESKTOP_ROWS: usize = 14;
+/// A row of upcoming titles is shown from three (Netflix's Kids Coming Next Week had 3)
+const MIN_UPCOMING_ITEMS: usize = 3;
+const DESKTOP_ROWS: usize = 6;
 
 #[derive(Deserialize)]
 pub struct NewPopularQuery {
@@ -61,7 +64,7 @@ pub async fn new_popular(
     let today = ymd(today_n);
     let year: i32 = today[..4].parse().unwrap_or(2026);
     let tab = q.tab.as_deref().map(str::trim).filter(|t| !t.is_empty());
-    let limit = q.limit.unwrap_or(if tab.is_some() { 10 } else { ROW_TITLES }).clamp(1, 30);
+    let limit = q.limit.unwrap_or(if tab.is_some() { 10 } else { ROW_TITLES }).clamp(1, ROW_TITLES);
 
     let slot = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / (6 * 3600)) as usize;
     // the tabs of the phone are the same for everyone; the desktop page differs by session and six hour slot
@@ -73,7 +76,7 @@ pub async fn new_popular(
         }
     }
 
-    let all = candidates(&catalog, &fresh, maturity, &state.profiles, year);
+    let all = candidates(&catalog, &fresh, maturity, &state.profiles, year, &today);
     let pool: Vec<&Cand> = all.iter().filter(|c| c.allowed && has_art(c)).collect();
 
     let body = match tab {
@@ -119,15 +122,16 @@ pub async fn new_popular(
             let mut seen: HashSet<(String, u32)> = HashSet::default();
             let mut out: Vec<Value> = Vec::new();
             for (i, row) in rows.into_iter().enumerate() {
-                // a title appears once on the page, in the first row that has it (the two Top 10 rows may share nothing anyway)
-                let items: Vec<Cand> = row.items.into_iter().filter(|c| seen.insert(c.key())).take(limit).collect();
-                if items.len() < MIN_ROW_ITEMS.min(10) && row.row_type != "top_ten" {
+                let ranked = row.row_type == "top_ten";
+                // a Top 10 keeps every title (Netflix's charts share titles with New on Netflix); the other rows show a title once, in the first row that has it
+                let items: Vec<Cand> = if ranked { row.items } else { row.items.into_iter().filter(|c| seen.insert(c.key())).take(limit).collect() };
+                let min = if row.kind == "soon" { MIN_UPCOMING_ITEMS } else { MIN_ROW_ITEMS };
+                if items.len() < min && !ranked {
                     continue;
                 }
                 if items.is_empty() {
                     continue;
                 }
-                let ranked = row.row_type == "top_ten";
                 out.push(json!({
                     "id": format!("newpop-{i}"), "row_type": row.row_type, "type": row.kind, "title": row.title, "title_key": row.key, "title_args": row.args,
                     "items": items.iter().enumerate().map(|(n, c)| item_json(c, ranked.then_some(n + 1), today_n)).collect::<Vec<_>>(),

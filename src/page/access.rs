@@ -76,6 +76,15 @@ pub fn meets_vote_floor(item: &CatalogItem, genre_page: bool) -> bool {
     !safety_nets() || item.vote_count == 0 || item.vote_count >= if genre_page { 5 } else { 10 }
 }
 
+/// A title made for children (TMDB Kids genre, a US TV-Y or TV-Y7 rating, a children's channel, or an animated series rated U in Britain with no US rating, such as
+/// Chibi Maruko-chan). See `PageContext::childrens_title` for where it matters.
+pub fn is_childrens_title(item: &CatalogItem) -> bool {
+    item.genres.iter().any(|g| g == "Kids")
+        || matches!(item.cert_us, 6 | 7)
+        || item.networks.iter().any(|n| KIDS_CHANNELS.contains(&n.as_str()))
+        || (item.media_type == "tv" && item.cert_us == 0 && item.cert_gb == 1 && item.genres.iter().any(|g| g == "Animation"))
+}
+
 /// Cheap quality gate for cluster members: drops obscure, unrated and stub entries.
 pub fn passes_member_quality(item: &CatalogItem) -> bool {
     // The catalog has no vote_count, so popularity is the proxy for a reliable rating.
@@ -86,7 +95,9 @@ pub fn passes_member_quality(item: &CatalogItem) -> bool {
 /// The quality gate of a page: a page whose members the Colab judge vetted (Stand-up, Cult, Independent ...) accepts less known titles (rating 5.5, popularity 0.5), since
 /// the niche is made of them; every other page uses `passes_member_quality`.
 pub fn member_quality_for(spec: Option<&crate::genre_spec::GenreSpec>, item: &CatalogItem) -> bool {
-    if spec.is_some_and(|s| s.is_judged()) {
+    // reality and children's pages take the lower gate: reality shows and children's series rarely collect the votes scripted dramas do
+    let lower = spec.is_some_and(|s| s.is_judged() || matches!(s, crate::genre_spec::GenreSpec::Reality | crate::genre_spec::GenreSpec::Kids(_)));
+    if lower {
         item.vote_average >= 5.5 && item.popularity >= 0.5 && item.has_overview() && item.has_poster() && (!safety_nets() || item.has_backdrop())
     } else {
         passes_member_quality(item)
@@ -151,11 +162,12 @@ impl<'a> PageContext<'a> {
         }
         let (m, d) = self.today;
         let md = (m as u32) * 100 + d as u32;
-        if f & FLAG_CHRISTMAS != 0 && !(md >= 1120 || md <= 106) {
+        // a seasonal title stays off the pages outside its season, except the page of its own event
+        let event_page = self.genre_spec.and_then(|s| s.event_id());
+        if f & FLAG_CHRISTMAS != 0 && event_page != Some("christmas") && !(md >= 1120 || md <= 106) {
             return false;
         }
-        let halloween_page = matches!(self.genre_spec, Some(crate::genre_spec::GenreSpec::Halloween));
-        if f & FLAG_HALLOWEEN != 0 && !halloween_page && !(1001..=1101).contains(&md) {
+        if f & FLAG_HALLOWEEN != 0 && event_page != Some("halloween") && !(1001..=1101).contains(&md) {
             return false;
         }
         true
@@ -173,11 +185,7 @@ impl<'a> PageContext<'a> {
     /// A title made for children (TMDB Kids genre, or a US TV-Y or TV-Y7 rating): on a page that is not a child's it stays out of the personal rows, the popular row and
     /// the composed rows that are not about children or animation (Miraculous next to Breaking Bad in Top Picks, iCarly next to The Boys in US Series).
     pub(crate) fn childrens_title(&self, item: &CatalogItem) -> bool {
-        item.genres.iter().any(|g| g == "Kids")
-            || matches!(item.cert_us, 6 | 7)
-            || item.networks.iter().any(|n| KIDS_CHANNELS.contains(&n.as_str()))
-            // an animated series rated U in Britain with no US rating (Chibi Maruko-chan) is a children's series
-            || (item.media_type == "tv" && item.cert_us == 0 && item.cert_gb == 1 && item.genres.iter().any(|g| g == "Animation"))
+        is_childrens_title(item)
     }
 
     /// The quality gate of this page (see `member_quality_for`).

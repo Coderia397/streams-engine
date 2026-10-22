@@ -32,7 +32,7 @@ pub async fn genre_support(
     for name in q.names.split(',').map(str::trim).filter(|n| !n.is_empty()).take(80) {
         let spec = crate::genre_spec::resolve(name, surface);
         let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, surface, &spec, maturity);
-        out.insert(name.to_string(), json!({ "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS }));
+        out.insert(name.to_string(), json!({ "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS && spec.in_season() }));
     }
     Json(json!({ "genres": out }))
 }
@@ -56,15 +56,22 @@ pub async fn genre_list(
     // a children's profile gets the Kids menus (Netflix's Kids Series and Kids Films lists); the three shared pages mix films and series
     let kids = maturity.is_some_and(|m| m.is_kids());
     let list = if kids { crate::genre_pages::kids_pages(surface) } else { crate::genre_pages::pages(surface) };
-    let genres: Vec<serde_json::Value> = list
+    let mut genres: Vec<serde_json::Value> = list
         .iter()
         .map(|(id, name)| {
             let page_surface = if kids { crate::genre_pages::kids_page_surface(*id) } else { surface };
             let spec = crate::genre_spec::resolve(name, page_surface);
             let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, page_surface, &spec, maturity);
-            json!({ "id": id, "name": name, "surface": page_surface, "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS })
+            json!({ "id": id, "name": name, "surface": page_surface, "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS && spec.in_season() })
         })
         .collect();
+    // the event pages after the genres (beyond Netflix): every event with a page, offered only in its window and when it can fill a page; they mix films and series
+    for (id, ev) in crate::genre_pages::event_menu_pages() {
+        let Some(def) = crate::events::get(ev) else { continue };
+        let spec = crate::genre_spec::GenreSpec::Event(ev.to_string());
+        let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, "both", &spec, maturity);
+        genres.push(json!({ "id": id, "name": def.label, "surface": "both", "event": ev, "in_season": spec.in_season(), "row_cap": cap, "supported": cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS && spec.in_season() }));
+    }
     let page = match (kids, surface) {
         (true, "tv") => crate::genre_pages::KIDS_SERIES_PAGE_ID,
         (true, _) => crate::genre_pages::KIDS_FILMS_PAGE_ID,
@@ -78,14 +85,26 @@ pub async fn genre_list(
 /// without a page id is left out; the list is empty out of season. The page of an event mixes films and series, like the home page.
 pub async fn season_chips(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let today = crate::taxonomy::today_md();
-    let chips: Vec<serde_json::Value> = crate::personal::events_in_season(&state.taxonomy, &state.vibe, today)
-        .into_iter()
-        .filter_map(|ev| {
-            let label = crate::personal::prettify(ev);
-            let id = crate::genre_pages::MOVIE_PAGES.iter().chain(crate::genre_pages::TV_PAGES.iter()).find(|(_, n)| n.eq_ignore_ascii_case(&label)).map(|(i, _)| *i)?;
-            Some(json!({ "id": ev, "label_key": format!("event.{ev}"), "label": label, "genre_id": id }))
+    let catalog = state.catalog.load();
+    // every event in its window whose page can be filled (events_v1.json gives the windows; the older taxonomy events stand in for an event the file does not know)
+    let mut chips: Vec<serde_json::Value> = crate::events::all()
+        .iter()
+        .filter(|e| e.season.active_on(today))
+        .filter_map(|e| {
+            let id = crate::genre_pages::event_page_id(&e.id)?;
+            let spec = crate::genre_spec::resolve(&id.to_string(), "both");
+            let cap = crate::routes::feed::genre_row_cap(&catalog, &state.profiles, "both", &spec, Some(Maturity::Adult));
+            (cap >= crate::routes::feed::MIN_GENRE_PAGE_ROWS).then(|| json!({ "id": e.id, "label_key": format!("event.{}", e.id), "label": e.label, "genre_id": id }))
         })
         .collect();
+    for ev in crate::personal::events_in_season(&state.taxonomy, &state.vibe, today) {
+        if chips.iter().any(|c| c["id"] == ev) {
+            continue;
+        }
+        let label = crate::personal::prettify(ev);
+        let Some(id) = crate::genre_pages::MOVIE_PAGES.iter().chain(crate::genre_pages::TV_PAGES.iter()).find(|(_, n)| n.eq_ignore_ascii_case(&label)).map(|(i, _)| *i) else { continue };
+        chips.push(json!({ "id": ev, "label_key": format!("event.{ev}"), "label": label, "genre_id": id }));
+    }
     Json(json!({ "chips": chips }))
 }
 

@@ -12,7 +12,6 @@ pub(super) struct Cand {
     pub(super) poster_path: Option<String>,
     pub(super) backdrop_path: Option<String>,
     pub(super) vote_average: f32,
-    pub(super) vote_count: u32,
     pub(super) popularity: f32,
     /// YYYY-MM-DD or empty
     pub(super) release_date: String,
@@ -23,10 +22,11 @@ pub(super) struct Cand {
     pub(super) cert: u8,
     pub(super) cert_gb: u8,
     pub(super) cert_us: u8,
-    pub(super) in_catalog: bool,
     pub(super) allowed: bool,
     pub(super) lists: Vec<String>,
     pub(super) ranks: HashMap<String, usize>,
+    /// Made for children (see `page::is_childrens_title`): off an adult's page, which has its own New & Popular on a Kids profile
+    pub(super) for_children: bool,
 }
 
 impl Cand {
@@ -53,10 +53,10 @@ impl Cand {
 pub(super) fn from_catalog(item: &CatalogItem, allowed: bool) -> Cand {
     Cand {
         media_type: item.media_type.clone(), tmdb_id: item.tmdb_id, title: item.title.clone(), overview: item.overview.clone(),
-        poster_path: item.poster_path.clone(), backdrop_path: item.backdrop_path.clone(), vote_average: item.vote_average, vote_count: item.vote_count,
+        poster_path: item.poster_path.clone(), backdrop_path: item.backdrop_path.clone(), vote_average: item.vote_average,
         popularity: item.popularity, release_date: String::new(), release_year: item.release_year, genres: item.genres.clone(),
         language: item.original_language.clone(), tv_type: item.tv_type.clone(), cert: item.cert, cert_gb: item.cert_gb, cert_us: item.cert_us,
-        in_catalog: true, allowed, lists: Vec::new(), ranks: HashMap::default(),
+        allowed, lists: Vec::new(), ranks: HashMap::default(), for_children: crate::page::is_childrens_title(item),
     }
 }
 
@@ -65,10 +65,10 @@ pub(super) fn from_fresh(f: &FreshItem, catalog_item: Option<&CatalogItem>, allo
         Some(item) => from_catalog(item, allowed),
         None => Cand {
             media_type: f.media_type.clone(), tmdb_id: f.id, title: f.title.clone(), overview: f.overview.clone(), poster_path: f.poster_path.clone(),
-            backdrop_path: f.backdrop_path.clone(), vote_average: f.vote_average, vote_count: f.vote_count, popularity: f.popularity,
+            backdrop_path: f.backdrop_path.clone(), vote_average: f.vote_average, popularity: f.popularity,
             release_date: String::new(), release_year: f.release_date.get(..4).and_then(|y| y.parse().ok()), genres: f.genres.clone(),
-            language: f.original_language.clone().unwrap_or_default(), tv_type: None, cert: 0, cert_gb: 0, cert_us: 0, in_catalog: false, allowed,
-            lists: Vec::new(), ranks: HashMap::default(),
+            language: f.original_language.clone().unwrap_or_default(), tv_type: None, cert: 0, cert_gb: 0, cert_us: 0, allowed,
+            lists: Vec::new(), ranks: HashMap::default(), for_children: f.genres.iter().any(|g| g == "Kids"),
         },
     };
     c.popularity = f.popularity.max(if catalog_item.is_some() { 0.0 } else { f.popularity });
@@ -95,16 +95,27 @@ pub(super) fn fresh_only_allowed(f: &FreshItem, maturity: Option<Maturity>) -> b
     !f.adult && maturity.is_none_or(|m| m == Maturity::Adult)
 }
 
+/// An upcoming title has no rating yet. A child's page may still announce it when its genres say it is a family or animated title with nothing darker: the title is
+/// only announced, not played (Netflix's Kids Worth the Wait: Barbie in the Nutcracker, Lumo the Lapland Reindeer).
+pub(super) fn upcoming_ok_for_kids(genres: &[String], adult: bool) -> bool {
+    let has = |n: &str| genres.iter().any(|g| g.eq_ignore_ascii_case(n));
+    !adult && (has("Family") || has("Animation") || has("Kids")) && !["Horror", "Crime", "Thriller", "Mystery", "War", "War & Politics", "Western", "Soap", "Talk", "News"].iter().any(|g| has(g))
+}
+
 /// All candidates: every fresh title, plus the catalog's own newest titles (release year this year or last) for rows that need no date.
-pub(super) fn candidates(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, year: i32) -> Vec<Cand> {
+pub(super) fn candidates(catalog: &CatalogMap, fresh: &FreshStore, maturity: Option<Maturity>, profiles: &crate::profiles::ProfileStore, year: i32, today: &str) -> Vec<Cand> {
     let mut out: Vec<Cand> = Vec::new();
     let mut seen: HashSet<(String, u32)> = HashSet::default();
+    let kids = maturity.is_some_and(|m| m.is_kids());
     for f in &fresh.items {
         let cat = resolve_key(catalog, f.id, Some(&f.media_type)).and_then(|k| catalog.get(&k));
-        let allowed = match cat {
+        let mut allowed = match cat {
             Some(item) => catalog_allowed(item, maturity, profiles),
             None => fresh_only_allowed(f, maturity),
         };
+        if !allowed && kids && f.release_date.as_str() > today && cat.is_none_or(|i| i.cert == 0) && upcoming_ok_for_kids(&f.genres, f.adult) {
+            allowed = true;
+        }
         let c = from_fresh(f, cat, allowed);
         seen.insert(c.key());
         out.push(c);

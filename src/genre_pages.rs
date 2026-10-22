@@ -108,6 +108,53 @@ pub const KIDS_MOVIE_PAGES: &[(u32, &str)] = &[
     (21020, "Watch with the Family"),
 ];
 
+/// The pages of the calendar events (beyond Netflix, note 98 W10): one page per event of `events_v1.json`, offered in its window only, films and series mixed like
+/// Home. The ids are stable (10101 up, in this order; never reused); Halloween keeps 10016 and Pride 10001, the ids of their Netflix pages.
+pub const EVENT_PAGES: &[(u32, &str)] = &[
+    (10016, "halloween"),
+    (10001, "pride"),
+    (10101, "christmas"),
+    (10102, "new_year"),
+    (10103, "valentines"),
+    (10104, "thanksgiving"),
+    (10105, "easter"),
+    (10106, "summer"),
+    (10107, "back_to_school"),
+    (10108, "autumn"),
+    (10109, "winter_cozy"),
+    (10110, "spring"),
+    (10111, "ramadan_eid"),
+    (10112, "diwali"),
+    (10113, "hanukkah"),
+    (10114, "black_history"),
+    (10115, "womens_history"),
+    (10116, "awards"),
+    (10117, "july4"),
+    (10118, "st_patricks"),
+    (10119, "mothers_day"),
+    (10120, "fathers_day"),
+    (10121, "lunar_new_year"),
+    (10122, "cinco_de_mayo"),
+    (10123, "independence_india"),
+    (10124, "summer_blockbuster"),
+];
+
+/// The id of an event's page.
+pub fn event_page_id(event: &str) -> Option<u32> {
+    EVENT_PAGES.iter().find(|(_, e)| *e == event).map(|(id, _)| *id)
+}
+
+/// The event of a page id, for the ids that are not also a genre page of the lists above (Halloween and Pride resolve through their own rules).
+pub fn event_of_page(id: u32) -> Option<&'static str> {
+    EVENT_PAGES.iter().find(|(i, _)| *i == id).map(|(_, e)| *e)
+}
+
+/// The event pages a menu offers after its genres: every event that has a page (the menu marks the ones out of season unsupported), Halloween and Pride left out because
+/// the genre lists carry them already.
+pub fn event_menu_pages() -> impl Iterator<Item = (u32, &'static str)> {
+    EVENT_PAGES.iter().filter(|(id, _)| *id >= 10101).map(|(id, e)| (*id, *e))
+}
+
 /// The genre list of a surface (`movie` or `tv`).
 pub fn pages(surface: &str) -> &'static [(u32, &'static str)] {
     if surface == "tv" { TV_PAGES } else { MOVIE_PAGES }

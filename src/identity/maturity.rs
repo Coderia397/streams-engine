@@ -11,8 +11,8 @@ pub enum Maturity {
 }
 
 /// Genres that keep a title out of both kids tiers (TMDB movie and TV names).
-const KIDS_BLOCKED_GENRES: [&str; 11] = [
-    "Horror", "Crime", "Thriller", "Mystery", "War", "War & Politics", "Reality", "Talk", "News", "Soap", "Western",
+const KIDS_BLOCKED_GENRES: [&str; 10] = [
+    "Horror", "Crime", "Thriller", "Mystery", "War", "War & Politics", "Talk", "News", "Soap", "Western",
 ];
 /// Keywords that mark violent or sexual content. The catalogue has no certifications, so this is a conservative stand in;
 /// it only applies to titles that carry keywords (pulled titles).
@@ -97,9 +97,12 @@ impl Maturity {
                 return false;
             }
             let kids_or_family = has("Kids") || has("Family");
+            // a competition or cooking show within the tier's rating is a child's reality show (Netflix's Kids Reality page: Is It Cake?, Nailed It!, Blown Away);
+            // talk, news and soaps are blocked above, and the preschool tier keeps to Kids and Family titles
+            let kids_reality = has("Reality") && !matches!(item.tv_type.as_deref(), Some("Talk Show") | Some("News"));
             return match self {
                 Self::LittleKids => kids_or_family,
-                _ => kids_or_family || has("Animation"),
+                _ => kids_or_family || has("Animation") || kids_reality,
             };
         }
         // a known age rating decides (12 or 15 tiers); an unrated title is allowed there
