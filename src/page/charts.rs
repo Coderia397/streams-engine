@@ -77,8 +77,12 @@ impl<'a> PageContext<'a> {
         self.build_chart_row(None)
     }
 
-    /// The Top 10 rows of this page: Movies and Series separately on the home page, one row on the other pages.
+    /// The Top 10 rows of this page: Movies and Series separately on the home page, one row on Films and Series; none on a genre page of composed rows (Netflix's genre
+    /// pages carry no Top 10: 1 of 50 adult and 1 of 36 children's pages, note 97).
     pub(super) fn build_chart_rows(&self) -> Vec<Row> {
+        if self.genre.is_some() && self.composed_rows() {
+            return Vec::new();
+        }
         if self.genre.is_none() && self.surface == "both" && safety_nets() {
             ["movie", "tv"].into_iter().filter_map(|t| self.build_chart_row(Some(t))).collect()
         } else {

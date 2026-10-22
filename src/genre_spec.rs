@@ -90,6 +90,22 @@ fn kw_is(it: &CatalogItem, words: &[&str]) -> bool {
 fn judged(it: &CatalogItem, slug: &str) -> Option<bool> {
     crate::catalog::CATEGORIES_LOADED.load(std::sync::atomic::Ordering::Relaxed).then(|| it.keywords.iter().any(|k| k.strip_prefix("cat:") == Some(slug)))
 }
+/// The channels of the after-school cartoons (Cartoon Network, Boomerang, Disney XD, Adult Swim, Toonami): a series of theirs is not a preschool one whatever its British rating.
+fn after_school_channel(it: &CatalogItem) -> bool {
+    it.networks.iter().any(|n| matches!(n.as_str(), "Cartoon Network" | "Boomerang" | "Disney XD" | "Adult Swim" | "Toonami"))
+}
+/// Whether two TMDB genre names mean the same genre across films and series ("Action" and "Action & Adventure", "Science Fiction" and "Sci-Fi & Fantasy").
+pub fn same_genre(a: &str, b: &str) -> bool {
+    fn family(g: &str) -> Option<&'static str> {
+        match g.to_ascii_lowercase().as_str() {
+            "action" | "adventure" | "action & adventure" => Some("action"),
+            "science fiction" | "fantasy" | "sci-fi & fantasy" => Some("scifi"),
+            "war" | "war & politics" => Some("war"),
+            _ => None,
+        }
+    }
+    a.eq_ignore_ascii_case(b) || matches!((family(a), family(b)), (Some(x), Some(y)) if x == y)
+}
 fn kw_has(it: &CatalogItem, parts: &[&str]) -> bool {
     it.keywords.iter().any(|k| parts.iter().any(|p| k.contains(p)))
 }
@@ -136,7 +152,8 @@ impl GenreSpec {
         };
         if let Some(slug) = slug {
             if let Some(j) = judged(it, slug) {
-                return j || (matches!(self, ChatShows) && judged(it, "stand_up") == Some(true));
+                // the Halloween series page (judged: 73 series) also takes the series that carry the event's keywords (witches, vampires, ghosts, zombies: events_v1.json)
+                return j || (matches!(self, ChatShows) && judged(it, "stand_up") == Some(true)) || (matches!(self, Halloween) && it.media_type == "tv" && crate::events::title_belongs("halloween", it));
             }
         }
         match self {
@@ -146,8 +163,9 @@ impl GenreSpec {
             Tmdb(names) => has_genre(it, names),
             // For Little Kids (ages about 5 to 8): U rated animation or family titles that are not preschool ones (those are For Little Ones)
             // For Little Ones: preschool television: TV-Y, or animation rated TV-G or U that runs 12 minutes or less, or the preschool words
+            // a TV-Y7 cartoon with a British U (Johnny Test, 11 minutes, Cartoon Network) is an after-school cartoon, not a preschool one: the US rating and the channel say so
             Kids("for little ones") => it.cert_us == 6
-                || ((it.cert_us == 8 || it.cert == 1) && (1..=12).contains(&it.runtime) && has_genre(it, &["Animation"]))
+                || ((it.cert_us == 8 || (it.cert == 1 && it.cert_us != 7)) && (1..=12).contains(&it.runtime) && has_genre(it, &["Animation"]) && !after_school_channel(it))
                 || kids_rule("for little ones").is_some_and(|(_, kws, _)| kw_is(it, kws)),
             // For Little Kids: the preschool titles (41% of Netflix's page are also on For Little Ones) and short U rated animation or family films and specials
             Kids("little kids") => kids_rule("for little ones").is_some_and(|(_, kws, _)| kw_is(it, kws)) || (it.cert == 1 && has_genre(it, &["Animation", "Family", "Kids"]) && it.runtime > 0 && it.runtime <= 75),
@@ -168,7 +186,7 @@ impl GenreSpec {
                   "b movie", "so bad it's good", "trash cinema", "splatter", "campy"],
             ),
             European => from_country(it, EUROPE) && !from_country(it, &["US", "GB"]),
-            Halloween => kw_has(it, &["halloween"]),
+            Halloween => kw_has(it, &["halloween"]) || (it.media_type == "tv" && crate::events::title_belongs("halloween", it)),
             // TMDB has no Horror or Romance genre for TV, so series are found through keywords
             Horror => has_genre(it, &["Horror"])
                 || (it.media_type == "tv"

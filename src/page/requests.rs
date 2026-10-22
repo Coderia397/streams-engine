@@ -55,9 +55,21 @@ const GENRE_PAGE_MIN_SHARE: f32 = 0.15;
 const GENRE_PAGE_MIN_FIT: usize = 25;
 /// Rows a composed page holds at most (Netflix's Home, Series and Films: 47 to 48 rows).
 const COMPOSED_ROWS_CAP: usize = 40;   // plus the personal and chart rows the page adds, about 48 in all
+/// Rows named for an award or acclaim (Award-Winning Films, Critically Acclaimed Series, Emmy-Winning Series) per page, measured on the captures of note 97: Netflix's genre
+/// pages carry one (median over 50 pages; 64% carry any; its full size pages of 46 to 48 rows carry 2 to 5), its Home, Films and Series pages 4, 5 and 8
+const AWARD_ROWS_GENRE_PAGE: usize = 3;
+const AWARD_ROWS_PLAIN_PAGE: usize = 6;
+/// Award rows a composed page keeps a place for when its score order leaves them out (Netflix's full size genre pages carry 2 to 5, Home 4, Series 8): the best of them
+/// replace the page's last topic rows
+const AWARD_ROWS_RESERVED_GENRE: usize = 2;
+const AWARD_ROWS_RESERVED_PLAIN: usize = 4;
+const AWARD_TOKENS: &[&str] = &["award-winning", "award", "awards", "emmy", "oscar", "bafta", "acclaimed", "critically-acclaimed", "critically", "nominees", "winners"];
 
-/// The family a composed row belongs to for the page's rhythm: place (an origin block), era (a decade block), or topic (everything else).
+/// The family a composed row belongs to for the page's rhythm: award (an award or acclaim block), place (an origin block), era (a decade block), or topic (everything else).
 fn family_of(r: &Request) -> &'static str {
+    if r.def.blocks.iter().any(|b| b.bucket == "structure" && AWARD_TOKENS.contains(&b.token.as_str())) {
+        return "award";
+    }
     match r.def.template.as_deref() {
         Some(t) if t.contains("{origin}") => "place",
         Some(t) if t.contains("{era}") => "era",
@@ -124,7 +136,7 @@ impl<'a> PageContext<'a> {
             // awards or adult genres: a "2000s Romantic Films" row is not a children's row even when its titles are rated PG)
             ("any", true) => {
                 let tpl = r.def.template.as_deref().unwrap_or("");
-                let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject}" | "{event} {format}" | "{event} {genre} {format}" | "{event}");
+                let plain = matches!(tpl, "{genre} {format}" | "{genre}" | "{subject} {format}" | "{subject} {genre} {format}" | "{subject} {genre}" | "{subject}" | "{event} {format}" | "{event} {genre} {format}" | "{event}" | "{netflix}");
                 let mood = matches!(tpl, "{mood} {format}" | "{mood} {genre} {format}" | "{mood} {genre}") && KID_MOODS.iter().any(|m| r.def.name.starts_with(m));
                 // a subject row reaches a child's page only for subjects children's rows are about ("Revenge Films" with Zootopia in it is not a children's row)
                 let subject_ok = r.def.blocks.iter().filter(|b| b.bucket == "subject").all(|b| KID_SUBJECTS.iter().any(|k| b.token.contains(k)));
@@ -239,6 +251,7 @@ impl<'a> PageContext<'a> {
             match fam {
                 "place" => ((self.target_rows as f32 * PLACE_SHARE).ceil() as usize).max(1),
                 "era" => ((self.target_rows as f32 * ERA_SHARE).ceil() as usize).max(1),
+                "award" => if self.genre_spec.is_some() { AWARD_ROWS_GENRE_PAGE } else { AWARD_ROWS_PLAIN_PAGE },
                 _ => usize::MAX,
             }
         };
@@ -250,7 +263,8 @@ impl<'a> PageContext<'a> {
         let mut made: Vec<Row> = Vec::new();
         // Netflix's plain pages hold about 48 rows (note 97); a composed page stops there, a thin page stops when its rows run out
         let target = if composed { self.target_rows.min(COMPOSED_ROWS_CAP) } else { self.target_rows };
-        for (_, req) in scored {
+        let mut award_ids: HashSet<String> = HashSet::default();
+        for &(_, req) in &scored {
             if made.len() >= target {
                 break;
             }
@@ -263,8 +277,9 @@ impl<'a> PageContext<'a> {
             }
             // rows of one genre page all lean the genre's way, so two of them may sit closer than two rows of Home
             let max_sim = if self.genre_spec.is_some() { REQUEST_MAX_ANCHOR_SIM_GENRE } else { REQUEST_MAX_ANCHOR_SIM };
-            // tier rows (note 103) are told apart by facts, not by their centres: every cartoon tier sits in the same corner of the vector space
-            let alike = req.def.kind != "tier" && placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim);
+            // tier rows (note 103) and award rows are told apart by facts, not by their centres: every cartoon tier sits in the same corner of the vector space, and
+            // "Award-winning Drama Series" sits where "Drama Series" does (Netflix runs them side by side on its Dramas pages)
+            let alike = req.def.kind != "tier" && fam != "award" && placed.iter().any(|a| cosine_sim(a, &req.anchor) > max_sim);
             if alike || !names.insert(req.def.name.to_lowercase()) {
                 continue;
             }
@@ -275,7 +290,35 @@ impl<'a> PageContext<'a> {
             placed.push(&req.anchor);
             *per_kind.entry(req.def.kind.as_str()).or_insert(0) += 1;
             *per_family.entry(fam).or_insert(0) += 1;
+            if fam == "award" {
+                award_ids.insert(req.def.id.clone());
+            }
             made.push(row);
+        }
+        // Netflix's rhythm keeps a place for award rows (note 97: its full size genre pages carry 2 to 5, Home 4, Series 8); a page whose score order left them out takes the
+        // best of them in place of its last topic rows
+        if composed {
+            let reserve = if self.genre_spec.is_some() { AWARD_ROWS_RESERVED_GENRE } else { AWARD_ROWS_RESERVED_PLAIN };
+            let mut have = per_family.get("award").copied().unwrap_or(0);
+            for &(_, req) in &scored {
+                if have >= reserve {
+                    break;
+                }
+                if family_of(req) != "award" || award_ids.contains(&req.def.id) || !names.insert(req.def.name.to_lowercase()) {
+                    continue;
+                }
+                let Some(mut row) = self.request_row(req, &taken) else { continue };
+                if made.len() >= target {
+                    let is_award = |r: &Row| r.meta.as_ref().and_then(|m| m.get("request")).and_then(|v| v.as_str()).is_some_and(|id| award_ids.contains(id));
+                    let Some(drop) = made.iter().rposition(|r| !is_award(r)) else { break };
+                    made.remove(drop);
+                }
+                row.meta = Some(serde_json::json!({ "request": req.def.id, "request_order": made.len() }));
+                taken.extend(row.items.iter().take(FIRST_SCREEN).map(|i| i.id));
+                award_ids.insert(req.def.id.clone());
+                have += 1;
+                made.push(row);
+            }
         }
         tracing::debug!("request page {} {:?}: {} requests apply, {} rows made", self.surface, self.genre, scored_n, made.len());
         if composed { made } else { spread_by_kind(made) }

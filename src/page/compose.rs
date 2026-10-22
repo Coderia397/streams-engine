@@ -176,7 +176,8 @@ impl<'a> PageContext<'a> {
             if let Some(r) = self.build_new_row(&taken_all) {
                 extra.push(r);
             }
-            if composed {
+            // Everyone's Watching: the plain pages and every children's page (Netflix carries it on no adult genre page and on 78% of children's genre pages, note 97)
+            if composed && (self.genre.is_none() || self.is_kids()) {
                 if let Some(r) = self.build_popular_row(&taken_all) {
                     extra.push(r);
                 }

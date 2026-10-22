@@ -8,6 +8,8 @@ const GEM_MAX_POPULARITY: f32 = 30.0;
 /// A title is a gem when it is rated well by enough people but few have found it yet.
 /// Titles in the Everyone's Watching row.
 const POPULAR_ROW: usize = 60;
+/// The scope's own titles a thin page draws its session rows from (best quality first)
+const SCOPE_POOL: usize = 3000;
 
 pub fn is_gem(item: &CatalogItem) -> bool {
     item.vote_average >= GEM_MIN_RATING && item.popularity < GEM_MAX_POPULARITY && item.vote_count >= 150
@@ -124,9 +126,60 @@ impl<'a> PageContext<'a> {
         Some(r)
     }
 
+    /// The titles the page may show, best quality first, for a profile without history on a page whose scope the popularity chart leaves nearly empty (Stand-up,
+    /// Black Stories, Documentaries): the scope's own titles, up to SCOPE_POOL.
+    fn scope_keys(&self) -> Vec<u32> {
+        let mut v: Vec<&CatalogItem> = self.catalog.values().filter(|i| self.matches_filters(i) && self.member_ok(i) && self.reliable(i)).collect();
+        crate::quality::sort_by_quality(&mut v);
+        v.into_iter().take(SCOPE_POOL).map(|i| i.id).collect()
+    }
+
+    /// The titles the page's Top 10 rows will hold (the most popular of each type the page may show): a profile without history must not meet them again in its
+    /// Top Picks (place_charts strips a Top 10 title out of every other row, which left the Home page's Top Picks under six titles and dropped it).
+    fn chart_ids(&self) -> HashSet<u32> {
+        let mut out: HashSet<u32> = HashSet::default();
+        if self.genre.is_some() {
+            return out;
+        }
+        for t in ["movie", "tv"] {
+            out.extend(
+                self.catalog
+                    .chart_keys
+                    .iter()
+                    .filter_map(|k| self.catalog.get(k))
+                    .filter(|i| i.media_type == t && self.matches_filters(i) && !self.fresh.is_upcoming(&i.media_type, i.tmdb_id, &self.today_ymd))
+                    .take(crate::page::TOP_N)
+                    .map(|i| i.id),
+            );
+        }
+        out
+    }
+
+    /// A row's candidates for a profile without history: the popularity chart's first `chart` titles the page may show (the gems list for `gems_only`), shaken per session;
+    /// when the page's scope leaves fewer than a row of them, the scope's own titles instead (its gems: rated 7 or more and little watched).
+    fn session_pool(&self, chart: usize, used: &HashSet<u32>, gems_only: bool, salt: usize) -> Vec<&CatalogItem> {
+        let from_chart = if gems_only {
+            self.rank_by_session(self.catalog.gem_keys.as_slice(), used, true, salt)
+        } else {
+            self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(chart)], used, false, salt)
+        };
+        if from_chart.len() >= crate::page::COHERENCE_MIN_ITEMS {
+            return blend_types(from_chart);
+        }
+        let scope = self.scope_keys();
+        let ranked = self.rank_by_session(&scope, used, false, salt);
+        if gems_only {
+            ranked.into_iter().filter(|i| i.vote_average >= 7.0 && i.popularity < GEM_MAX_POPULARITY).collect()
+        } else {
+            blend_types(ranked)
+        }
+    }
+
     /// All personal rows of this page. `taken` holds the titles other rows of the page already use; discovery rows avoid them and avoid the profile's own titles.
+    /// A children's genre page carries no Top Picks and no Next Watch (Netflix: none of its 36 children's genre pages, note 97).
     pub(crate) async fn build_personal_rows(&self, taken: &HashSet<u32>) -> Vec<Row> {
         let sig = self.signals;
+        let kids_genre_page = self.is_kids() && self.genre.is_some();
         let own: HashSet<u32> = sig.saved.iter().chain(&sig.recent).chain(&sig.liked).copied().collect();
         let mut rows: Vec<Row> = Vec::new();
         let on_home = self.genre.is_none() && self.language.is_none();
@@ -136,6 +189,7 @@ impl<'a> PageContext<'a> {
         }
         let mut used: HashSet<u32> = taken.clone();
         used.extend(own.iter().copied());
+        used.extend(self.chart_ids());
         // titles of the profile in the order of use for anchors: the latest watched first, then liked, then saved
         let anchors = |keys: &[u32], skip: &HashSet<u32>| -> Vec<&CatalogItem> {
             keys.iter().filter(|k| !skip.contains(*k)).filter_map(|k| self.catalog.get(k)).filter(|i| self.personal_ok(i)).collect()
@@ -170,7 +224,8 @@ impl<'a> PageContext<'a> {
                 let keys = self.neighbour_keys(t, 800).await;
                 self.rank_by_taste(&keys, &used, t, false)
             }
-            None => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(1500)], &used, false, 100_003)),
+            None if kids_genre_page => Vec::new(),
+            None => self.session_pool(1500, &used, false, 100_003),
         };
         if let Some(mut r) = self.row_of("Today's Top Picks for You", "personal", &top) {
             r.archetype = "top_picks".to_string();
@@ -185,7 +240,7 @@ impl<'a> PageContext<'a> {
                 let keys = self.neighbour_keys(&t, 600).await;
                 self.rank_by_taste(&keys, &used, &t, false)
             }
-            None if composed => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(3000)], &used, false, 300_007)),
+            None if composed && !kids_genre_page => self.session_pool(3000, &used, false, 300_007),
             None => Vec::new(),
         };
         if let Some(mut r) = self.row_of("Your Next Watch", "personal", &next) {
@@ -202,7 +257,7 @@ impl<'a> PageContext<'a> {
                     let keys = self.neighbour_keys(&t, 800).await;
                     self.rank_by_taste(&keys, &used, &t, false)
                 }
-                None if composed => blend_types(self.rank_by_session(&self.catalog.chart_keys[..self.catalog.chart_keys.len().min(4000)], &used, false, 400_009)),
+                None if composed => self.session_pool(4000, &used, false, 400_009),
                 None => Vec::new(),
             };
             if let Some(mut r) = self.row_of("We Think You'll Love These", "personal", &love) {
@@ -219,7 +274,7 @@ impl<'a> PageContext<'a> {
                 let keys = self.neighbour_keys(t, 2500).await;
                 self.rank_by_taste(&keys, &used, t, true)
             }
-            None => blend_types(self.rank_by_session(self.catalog.gem_keys.as_slice(), &used, true, 200_017)),
+            None => self.session_pool(0, &used, true, 200_017),
         };
         if let Some(mut r) = self.row_of("Gems for You", "personal", &gems) {
             r.archetype = "gems".to_string();

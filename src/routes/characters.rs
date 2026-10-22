@@ -12,6 +12,14 @@ use std::sync::Arc;
 const CHARACTERS: usize = 50;
 /// Members listed with a franchise
 const MEMBERS: usize = 8;
+/// A franchise Netflix itself lists (one of its titles carries a Netflix tag, note 102) weighs this much more than its popularity alone: Netflix's strip is its own
+/// licensed set (8 of 49 names matched ours before, note 104), so the franchises both carry lead, the rest of the catalog follows
+const NETFLIX_LISTED_WEIGHT: f32 = 3.0;
+
+/// Whether Netflix lists the title: it carries a Netflix tag (`nf:` keyword, netflix_tags.json).
+fn netflix_listed(item: &CatalogItem) -> bool {
+    item.keywords.iter().any(|k| k.starts_with("nf:"))
+}
 
 #[derive(Deserialize)]
 pub struct CharactersQuery {
@@ -72,6 +80,13 @@ pub async fn characters(State(state): State<Arc<AppState>>, MaybeCaller(caller):
         }
         g.push(it);
     }
+    // the strip's order: a franchise's popularity (its titles together), three times that when Netflix lists one of its titles; ties keep the popularity order
+    let mass = |key: &String| -> f32 {
+        let g = &groups[key];
+        let pop: f32 = g.iter().map(|i| i.popularity).sum();
+        if g.iter().any(|i| netflix_listed(i)) { pop * NETFLIX_LISTED_WEIGHT } else { pop }
+    };
+    order.sort_by(|a, b| mass(b).partial_cmp(&mass(a)).unwrap_or(std::cmp::Ordering::Equal));
     let items: Vec<serde_json::Value> = order
         .iter()
         .filter_map(|key| {
@@ -89,7 +104,7 @@ pub async fn characters(State(state): State<Arc<AppState>>, MaybeCaller(caller):
             let name = if own.len() >= skip + words { own[..skip + words].join(" ") } else { cleaned.to_string() };
             Some(json!({
                 "id": lead.tmdb_id, "media_type": lead.media_type, "title": name, "lead_title": lead.title, "poster_path": lead.poster_path, "backdrop_path": lead.backdrop_path,
-                "titles": g.len(), "popularity": g.iter().map(|i| i.popularity).sum::<f32>(),
+                "titles": g.len(), "popularity": g.iter().map(|i| i.popularity).sum::<f32>(), "netflix_listed": g.iter().any(|i| netflix_listed(i)),
                 "members": g.iter().take(MEMBERS).map(|i| json!({ "id": i.tmdb_id, "media_type": i.media_type, "title": i.title })).collect::<Vec<_>>(),
             }))
         })

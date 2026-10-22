@@ -12,6 +12,9 @@ pub struct EventDef {
     pub season: Season,
     pub keywords: Vec<String>,
     pub genres: Vec<String>,
+    /// Original languages whose titles belong when the event has no keywords of its own in TMDB (Lunar New Year: zh; Ramadan & Eid: ar, tr, ur, fa, ms, id;
+    /// Hanukkah: he), kept to the event's genres
+    pub languages: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +31,8 @@ struct RawEvent {
     keywords: Vec<String>,
     #[serde(default)]
     genres: Vec<String>,
+    #[serde(default)]
+    languages: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,7 +58,7 @@ pub fn load(db_path: &str) {
                 .into_iter()
                 .filter_map(|(id, e)| {
                     let season = Season { start: parse_md(&e.season.start)?, end: parse_md(&e.season.end)? };
-                    Some(EventDef { id, label: e.label, season, keywords: e.keywords.into_iter().map(|k| k.to_lowercase()).collect(), genres: e.genres })
+                    Some(EventDef { id, label: e.label, season, keywords: e.keywords.into_iter().map(|k| k.to_lowercase()).collect(), genres: e.genres, languages: e.languages })
                 })
                 .collect::<Vec<_>>()
         })
@@ -81,9 +86,13 @@ pub fn in_season(id: &str) -> bool {
     get(id).is_some_and(|e| e.season.active_on(crate::taxonomy::today_md()))
 }
 
-/// Whether a title belongs to the event: it carries one of the event's keywords (TMDB keywords and Netflix tags alike).
+/// Whether a title belongs to the event: it carries one of the event's keywords (TMDB keywords and Netflix tags alike), or it is in one of the event's languages and
+/// one of the event's genres (an event whose keywords TMDB does not have).
 pub fn title_belongs(id: &str, item: &crate::catalog::CatalogItem) -> bool {
-    get(id).is_some_and(|e| item.keywords.iter().any(|k| e.keywords.iter().any(|w| w == k)))
+    get(id).is_some_and(|e| {
+        item.keywords.iter().any(|k| e.keywords.iter().any(|w| w == k))
+            || (!e.languages.is_empty() && e.languages.iter().any(|l| *l == item.original_language) && (e.genres.is_empty() || item.genres.iter().any(|g| e.genres.iter().any(|x| crate::genre_spec::same_genre(x, g)))))
+    })
 }
 
 #[cfg(test)]
