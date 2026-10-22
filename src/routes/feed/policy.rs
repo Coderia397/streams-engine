@@ -18,6 +18,9 @@ const ROW_TITLES: usize = 15;
 const SESSION_TURNOVER: usize = 2;
 /// Below this a genre has too few rows to be its own page.
 pub const MIN_GENRE_PAGE_ROWS: usize = 8;
+/// A page's rows against the captured Netflix page's: a little more for rotation, never past Netflix's largest pages
+const LEARNED_ROWS_FACTOR: f32 = 1.15;
+const LEARNED_ROWS_MAX: usize = 48;
 
 /// How many rows the page can have and how many are built for this request.
 pub struct PagePlan {
@@ -30,16 +33,24 @@ pub struct PagePlan {
 }
 
 impl PagePlan {
-    pub fn new(catalog: &CatalogMap, profiles: &ProfileStore, surface: &str, genre_spec: Option<&GenreSpec>, language: Option<&str>, maturity: Option<Maturity>, wanted_rows: usize) -> Self {
+    pub fn new(catalog: &CatalogMap, profiles: &ProfileStore, surface: &str, genre_spec: Option<&GenreSpec>, genre_name: Option<&str>, language: Option<&str>, maturity: Option<Maturity>, wanted_rows: usize) -> Self {
         let own_cap = match (genre_spec, language) {
             (Some(spec), None) => genre_row_cap_cached(catalog, profiles, surface, spec, maturity),
             _ => usize::MAX,
         };
-        let cap = match (genre_spec, language) {
+        let mut cap = match (genre_spec, language) {
             (Some(_), None) => own_cap.max(crate::page::THIN_PAGE_FLOOR),
             (_, Some(lang)) => language_row_cap_cached(catalog, profiles, surface, lang, maturity),
             (None, None) => NETFLIX_ROWS_CAP,
         };
+        // the rows Netflix gives the same page (page_rhythm_v1.json, learned from the captures) cap the page: round(rows x 1.15) between 8 and 48, so a page Netflix
+        // keeps to 3 or 10 rows is not padded to 44 (owner, 2026-10-22); a page the captures do not hold keeps the cap above
+        if language.is_none() {
+            let kids = maturity.is_some_and(|m| m.is_kids());
+            if let Some(rows) = crate::page::rhythm::page_rows(kids, surface, genre_name.filter(|_| genre_spec.is_some())) {
+                cap = cap.min(((rows * LEARNED_ROWS_FACTOR).round() as usize).clamp(MIN_ROWS_FLOOR, LEARNED_ROWS_MAX));
+            }
+        }
         let target_rows = wanted_rows.min(cap.max(MIN_ROWS_FLOOR)).max(MIN_ROWS_FLOOR);
         Self { own_cap, cap, target_rows }
     }

@@ -10,9 +10,7 @@ impl<'a> PageContext<'a> {
         if charts.is_empty() {
             charts = old_charts;
         }
-        if charts.is_empty() {
-            return body;
-        }
+        // a page without a Top 10 (a composed genre page) still places its personal rows below
         // a title that is in a Top 10 is not repeated in the rows around it (the Top 10 must keep its ten)
         let chart_ids: HashSet<u32> = charts.iter().flat_map(|c| c.items.iter().map(|i| i.id)).collect();
         for row in body.iter_mut() {
@@ -24,29 +22,50 @@ impl<'a> PageContext<'a> {
 
         // Fixed slots: the rows of the catalog layer (Top 10, New Releases, collections) and of the personal layer sit at the same positions in every session and on every profile
         // that has them; the topic rows keep their order around them. Positions are zero based and apply once the rows exist.
-        let mut slotted: Vec<(usize, Row)> = Vec::new();
         let mut plain: Vec<Row> = Vec::new();
         let (mut byw_n, mut coll_n) = (0usize, 0usize);
+        // the learned place of each personal and chart row on pages of this kind (page_rhythm_v1.json): its position share, put inside its quartile window by the
+        // session's noise, times the page's rows; a row the captures do not place on this kind keeps its slot constant
+        let kids = self.is_kids();
+        let has_genre = self.genre.is_some();
+        let total = body.len() + charts.len();
+        let learned = |archetype: &str, salt: usize| -> Option<usize> {
+            let name = match archetype { "trending" => "chart", "byw" | "more_like" => "more_like", other => other };
+            let q = crate::page::rhythm::archetype_position(kids, self.surface, has_genre, name)?;
+            let share = crate::page::rhythm::jittered(q, entry_noise(self.session, 9_000 + salt));
+            Some((share * total.saturating_sub(1) as f32).round() as usize)
+        };
+        // (slot, learned, row): a learned place is jittered already (inside its quartiles); a slot constant takes the window of its kind below
+        let mut slotted: Vec<(usize, bool, Row)> = Vec::new();
         for r in body {
+            if let Some(slot) = learned(&r.archetype, slotted.len() * 17 + r.archetype.len()) {
+                slotted.push((slot, true, r));
+                continue;
+            }
             match r.archetype.as_str() {
-                "continue" => slotted.push((SLOT_CONTINUE, r)),
-                "top_picks" => slotted.push((SLOT_TOP_PICKS, r)),
-                "list" => slotted.push((SLOT_LIST, r)),
-                "new" => slotted.push((SLOT_NEW, r)),
-                "next_watch" => slotted.push((SLOT_NEXT, r)),
-                "gems" => slotted.push((SLOT_GEMS, r)),
-                "love_these" => slotted.push((SLOT_LOVE, r)),
-                "favourites" => slotted.push((SLOT_FAVOURITES, r)),
-                "popular" => slotted.push((SLOT_POPULAR, r)),
-                "byw" | "more_like" => { slotted.push((SLOT_ABOUT[byw_n.min(SLOT_ABOUT.len() - 1)], r)); byw_n += 1; }
-                "collection" => { slotted.push((SLOT_COLLECTION[coll_n.min(SLOT_COLLECTION.len() - 1)], r)); coll_n += 1; }
+                "continue" => slotted.push((SLOT_CONTINUE, false, r)),
+                "top_picks" => slotted.push((SLOT_TOP_PICKS, false, r)),
+                "list" => slotted.push((SLOT_LIST, false, r)),
+                "new" => slotted.push((SLOT_NEW, false, r)),
+                "next_watch" => slotted.push((SLOT_NEXT, false, r)),
+                "gems" => slotted.push((SLOT_GEMS, false, r)),
+                "love_these" => slotted.push((SLOT_LOVE, false, r)),
+                "favourites" => slotted.push((SLOT_FAVOURITES, false, r)),
+                "popular" => slotted.push((SLOT_POPULAR, false, r)),
+                "byw" | "more_like" => { slotted.push((SLOT_ABOUT[byw_n.min(SLOT_ABOUT.len() - 1)], false, r)); byw_n += 1; }
+                "collection" => { slotted.push((SLOT_COLLECTION[coll_n.min(SLOT_COLLECTION.len() - 1)], false, r)); coll_n += 1; }
                 _ => plain.push(r),
             }
         }
         // topic rows of one genre (three horror rows in the first six) do not follow each other: rows are reordered so a dominant genre does not repeat within three rows
-        let mut plain = if self.genre.is_none() { spread_by_genre(plain) } else { plain };
+        // rows of one genre are kept apart where Netflix keeps them apart on this kind of page (neighbours share a genre word less often than a random order would)
+        let spread = crate::page::rhythm::spreads_genres(kids, self.surface, has_genre).unwrap_or(self.genre.is_none());
+        let mut plain = if spread { spread_by_genre(plain) } else { plain };
         for (k, r) in charts.into_iter().enumerate() {
-            slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], r));
+            match learned("trending", 500 + k) {
+                Some(slot) => slotted.push((slot + k, true, r)),
+                None => slotted.push((SLOT_CHART[k.min(SLOT_CHART.len() - 1)], false, r)),
+            }
         }
         // The slots are places to aim at, not places to be at: each kind of row has a window and a session puts it somewhere in that window (the same for the whole session, different
         // between sessions), so the page is not the same list in the same order for everyone. Continue watching and your list stay first.
@@ -60,8 +79,7 @@ impl<'a> PageContext<'a> {
             };
             if width == 0 { 0 } else { ((entry_noise(self.session, 7_000 + slot * 13) * width as f32) as usize).min(width - 1) }
         };
-        let slotted: Vec<(usize, Row)> = slotted.into_iter().map(|(slot, r)| (slot + jitter(slot, &r.archetype), r)).collect();
-        let mut slotted = slotted;
+        let mut slotted: Vec<(usize, Row)> = slotted.into_iter().map(|(slot, learned, r)| (if learned { slot } else { slot + jitter(slot, &r.archetype) }, r)).collect();
         // equal slots (more rows than slots of a kind) go one after the other
         slotted.sort_by_key(|(slot, _)| *slot);
         let mut next_free = 0usize;

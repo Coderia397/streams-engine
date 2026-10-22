@@ -36,6 +36,18 @@ pub struct RequestDef {
     /// The blocks the row is composed of (bucket and token), for page rules that look at what a row is about
     #[serde(default)]
     pub blocks: Vec<BlockRef>,
+    /// Where Netflix puts this row on a page (position share over the captures, netflix_rhythm.py), for a row that carries a Netflix name
+    #[serde(default)]
+    pub position_share: Option<PositionShare>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PositionShare {
+    pub median: f32,
+    pub p25: f32,
+    pub p75: f32,
+    #[serde(default)]
+    pub instances: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

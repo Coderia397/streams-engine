@@ -58,7 +58,7 @@ async fn build_page_body(state: &AppState, req: &FeedRequest, session: &SessionV
     let catalog = state.catalog.load();
     let fresh = state.fresh.load();
     let genre_spec = req.genre.as_deref().map(|g| crate::genre_spec::resolve(g, req.surface));
-    let plan = policy::PagePlan::new(&catalog, &state.profiles, req.surface, genre_spec.as_ref(), req.language.as_deref(), req.maturity, req.offset + req.per_page);
+    let plan = policy::PagePlan::new(&catalog, &state.profiles, req.surface, genre_spec.as_ref(), req.genre.as_deref(), req.language.as_deref(), req.maturity, req.offset + req.per_page);
 
     // Build taste query vector from client-provided genre affinities
     let mut affinities = parse_taste(&req.taste);

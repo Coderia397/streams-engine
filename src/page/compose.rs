@@ -9,6 +9,8 @@ use super::*;
 const REQUEST_PAGE_MIN_ROWS: usize = 8;
 /// A page of composed rows needs this many; below it the page is built the older way.
 const COMPOSED_PAGE_MIN_ROWS: usize = 1;   // Netflix's Dinosaurs page has 2 rows: a thin page shows what it has
+/// A captured page under this many rows is thin: it carries only the personal and chart rows the captures show on it
+const THIN_LEARNED_PAGE: f32 = 15.0;
 
 /// The ids of the titles already in a row of the page.
 fn taken_ids(rows: &[Row]) -> HashSet<u32> {
@@ -181,6 +183,13 @@ impl<'a> PageContext<'a> {
                 if let Some(r) = self.build_popular_row(&taken_all) {
                     extra.push(r);
                 }
+            }
+        }
+        // a thin captured page (Netflix keeps Cult to 3 rows, Dinosaurs to 2) carries only the personal and chart rows the captures show on it
+        if let Some((rows_median, present)) = crate::page::rhythm::page_archetypes(self.is_kids(), self.surface, self.genre) {
+            if rows_median < THIN_LEARNED_PAGE {
+                let name = |a: &str| match a { "trending" => "chart", "byw" | "more_like" => "more_like", other => other }.to_string();
+                extra.retain(|r| present.contains(&name(&r.archetype)));
             }
         }
         rows.extend(extra);

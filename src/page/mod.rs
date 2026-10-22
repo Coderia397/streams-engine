@@ -14,6 +14,7 @@ mod requests;
 mod retrieval;
 mod stats;
 mod tuning;
+pub mod rhythm;
 mod types;
 
 pub use access::*;

@@ -76,6 +76,7 @@ fn open_index_file(config: &Config, stamp: &str) -> Option<HnswIndex> {
 pub async fn build_app_state(config: &Config) -> Result<Arc<AppState>> {
     let db = config.db_path.as_str();
     crate::events::load(db);
+    crate::page::rhythm::load(db);
     let profile_dir = std::path::Path::new(db).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
     let stamp = vectors_stamp(&config.vectors_path);
 

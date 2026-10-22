@@ -55,14 +55,9 @@ const GENRE_PAGE_MIN_SHARE: f32 = 0.15;
 const GENRE_PAGE_MIN_FIT: usize = 25;
 /// Rows a composed page holds at most (Netflix's Home, Series and Films: 47 to 48 rows).
 const COMPOSED_ROWS_CAP: usize = 40;   // plus the personal and chart rows the page adds, about 48 in all
-/// Rows named for an award or acclaim (Award-Winning Films, Critically Acclaimed Series, Emmy-Winning Series) per page, measured on the captures of note 97: Netflix's genre
-/// pages carry one (median over 50 pages; 64% carry any; its full size pages of 46 to 48 rows carry 2 to 5), its Home, Films and Series pages 4, 5 and 8
-const AWARD_ROWS_GENRE_PAGE: usize = 3;
-const AWARD_ROWS_PLAIN_PAGE: usize = 6;
-/// Award rows a composed page keeps a place for when its score order leaves them out (Netflix's full size genre pages carry 2 to 5, Home 4, Series 8): the best of them
-/// replace the page's last topic rows
-const AWARD_ROWS_RESERVED_GENRE: usize = 2;
-const AWARD_ROWS_RESERVED_PLAIN: usize = 4;
+/// Rows named for an award or acclaim (Award-Winning Films, Critically Acclaimed Series) per page when the captures do not say: one (owner, 2026-10-22: the rows that loop one word
+/// over every genre read as copies; Netflix's genre pages carry one as the median, note 97). The learned page rhythm (page_rhythm_v1.json) gives the count per page kind.
+const AWARD_ROWS_PER_PAGE: usize = 1;
 const AWARD_TOKENS: &[&str] = &["award-winning", "award", "awards", "emmy", "oscar", "bafta", "acclaimed", "critically-acclaimed", "critically", "nominees", "winners"];
 
 /// The family a composed row belongs to for the page's rhythm: award (an award or acclaim block), place (an origin block), era (a decade block), or topic (everything else).
@@ -251,7 +246,7 @@ impl<'a> PageContext<'a> {
             match fam {
                 "place" => ((self.target_rows as f32 * PLACE_SHARE).ceil() as usize).max(1),
                 "era" => ((self.target_rows as f32 * ERA_SHARE).ceil() as usize).max(1),
-                "award" => if self.genre_spec.is_some() { AWARD_ROWS_GENRE_PAGE } else { AWARD_ROWS_PLAIN_PAGE },
+                "award" => crate::page::rhythm::award_rows(self.is_kids(), self.surface, self.genre_spec.is_some()).unwrap_or(AWARD_ROWS_PER_PAGE),
                 _ => usize::MAX,
             }
         };
@@ -261,9 +256,12 @@ impl<'a> PageContext<'a> {
         let mut per_kind: HashMap<&str, usize> = HashMap::default();
         let mut per_family: HashMap<&str, usize> = HashMap::default();
         let mut made: Vec<Row> = Vec::new();
+        let mut made_reqs: Vec<&Request> = Vec::new();
         // Netflix's plain pages hold about 48 rows (note 97); a composed page stops there, a thin page stops when its rows run out
-        let target = if composed { self.target_rows.min(COMPOSED_ROWS_CAP) } else { self.target_rows };
-        let mut award_ids: HashSet<String> = HashSet::default();
+        // a composed page's rows are the page's learned row count less the personal and chart rows Netflix carries on pages of this kind (page_rhythm_v1.json), so the
+        // whole page lands near Netflix's count; without the rhythm file the cap of 40 topic rows stands
+        let learned_total = crate::page::rhythm::personal_chart_rows(self.is_kids(), self.surface, self.genre_spec.is_some()).map(|pc| (self.target_rows as f32 - pc).round().max(2.0) as usize);
+        let target = if composed { learned_total.unwrap_or(COMPOSED_ROWS_CAP).min(self.target_rows.min(COMPOSED_ROWS_CAP).max(2)) } else { self.target_rows };
         for &(_, req) in &scored {
             if made.len() >= target {
                 break;
@@ -290,34 +288,40 @@ impl<'a> PageContext<'a> {
             placed.push(&req.anchor);
             *per_kind.entry(req.def.kind.as_str()).or_insert(0) += 1;
             *per_family.entry(fam).or_insert(0) += 1;
-            if fam == "award" {
-                award_ids.insert(req.def.id.clone());
-            }
             made.push(row);
+            made_reqs.push(req);
         }
-        // Netflix's rhythm keeps a place for award rows (note 97: its full size genre pages carry 2 to 5, Home 4, Series 8); a page whose score order left them out takes the
-        // best of them in place of its last topic rows
-        if composed {
-            let reserve = if self.genre_spec.is_some() { AWARD_ROWS_RESERVED_GENRE } else { AWARD_ROWS_RESERVED_PLAIN };
-            let mut have = per_family.get("award").copied().unwrap_or(0);
-            for &(_, req) in &scored {
-                if have >= reserve {
-                    break;
+        // the order of the page: a row that carries a Netflix name sits where Netflix puts it (its position share over the captures), any other row where its family
+        // sits on pages of this kind (page_rhythm_v1.json), each put inside its quartile window by the session's noise; the rows of the page's own event lead. The score
+        // above chose the rows; it no longer orders them (owner, 2026-10-22: the order is learned, not a tier table). Without the rhythm file the score order stands.
+        if composed && crate::page::rhythm::kind(self.is_kids(), self.surface, self.genre_spec.is_some()).is_some() {
+            let kids = self.is_kids();
+            let has_genre = self.genre_spec.is_some();
+            let event = self.genre_spec.and_then(|s| s.event_id());
+            let mut keyed: Vec<(f32, usize)> = made_reqs
+                .iter()
+                .enumerate()
+                .map(|(i, req)| {
+                    let noise = entry_noise(self.session, 11_000 + id_number(&req.def.id) % 10_000);
+                    let own_event = event.is_some_and(|ev| req.def.blocks.iter().any(|b| b.bucket == "event" && b.token == ev));
+                    let share = if own_event {
+                        0.02 * noise
+                    } else if let Some(p) = req.def.position_share {
+                        crate::page::rhythm::jittered(crate::page::rhythm::Quart { median: p.median, p25: p.p25, p75: p.p75, n: p.instances }, noise)
+                    } else {
+                        let family = if req.def.kind == "mood" { "mood" } else { match family_of(req) { "award" => "award", "place" => "place", _ => "topic" } };
+                        crate::page::rhythm::family_position(kids, self.surface, has_genre, family).map_or(0.5 + 0.3 * (noise - 0.5), |q| crate::page::rhythm::jittered(q, noise))
+                    };
+                    (share, i)
+                })
+                .collect();
+            keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+            let mut rows: Vec<Option<Row>> = made.into_iter().map(Some).collect();
+            made = keyed.iter().filter_map(|(_, i)| rows[*i].take()).collect();
+            for (n, row) in made.iter_mut().enumerate() {
+                if let Some(m) = row.meta.as_mut().and_then(|m| m.as_object_mut()) {
+                    m.insert("request_order".to_string(), serde_json::json!(n));
                 }
-                if family_of(req) != "award" || award_ids.contains(&req.def.id) || !names.insert(req.def.name.to_lowercase()) {
-                    continue;
-                }
-                let Some(mut row) = self.request_row(req, &taken) else { continue };
-                if made.len() >= target {
-                    let is_award = |r: &Row| r.meta.as_ref().and_then(|m| m.get("request")).and_then(|v| v.as_str()).is_some_and(|id| award_ids.contains(id));
-                    let Some(drop) = made.iter().rposition(|r| !is_award(r)) else { break };
-                    made.remove(drop);
-                }
-                row.meta = Some(serde_json::json!({ "request": req.def.id, "request_order": made.len() }));
-                taken.extend(row.items.iter().take(FIRST_SCREEN).map(|i| i.id));
-                award_ids.insert(req.def.id.clone());
-                have += 1;
-                made.push(row);
             }
         }
         tracing::debug!("request page {} {:?}: {} requests apply, {} rows made", self.surface, self.genre, scored_n, made.len());
