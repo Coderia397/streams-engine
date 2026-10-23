@@ -43,6 +43,28 @@ const REC_THEME_WEIGHT: f32 = 0.0;
 
 fn dot(a: &[f32], b: &[f32]) -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() }
 
+/// Where a centred cosine falls among real recommendations: the 0th, 5th, ... 100th percentile of the centred cosine of the top 20
+/// recommendations of 220 titles from the Home, Series and Films feeds (4,400 pairs, vectors_v2, measured 2026-10-23, note 113).
+const MATCH_CUTS: [f32; 21] = [
+    0.2719, 0.3442, 0.3662, 0.3819, 0.3956, 0.4067, 0.4177, 0.4271, 0.4358, 0.4454, 0.4546, 0.4645, 0.4749, 0.4855, 0.4982, 0.5129,
+    0.5286, 0.5463, 0.5705, 0.6024, 0.9381,
+];
+
+/// The "% Match" shown on a recommendation: 60 % for the weakest pair seen, 99 % for the strongest, by percentile in between, so the
+/// median pair reads about 80 % and a typical closest match about 92 % (the raw cosine read 43 % to 57 % for good matches).
+fn match_percent(sim: f32) -> u32 {
+    let i = MATCH_CUTS.partition_point(|c| *c <= sim);
+    let fraction = if i == 0 {
+        0.0
+    } else if i >= MATCH_CUTS.len() {
+        1.0
+    } else {
+        let (a, b) = (MATCH_CUTS[i - 1], MATCH_CUTS[i]);
+        ((i - 1) as f32 + (sim - a) / (b - a).max(1e-6)) / 20.0
+    };
+    (60.0 + 39.0 * fraction).round() as u32
+}
+
 /// Unit vector of an item, centred on the corpus mean. Raw pairs in this space share a high baseline
 /// cosine, so match percentages come from the centred value.
 fn centred(state: &AppState, idx: usize) -> Vec<f32> {
@@ -167,7 +189,7 @@ pub async fn recommendations(
                 "rating_us":         crate::catalog::us_label(item.cert_us),
                 "similarity":        sim,
                 "cosine_similarity": sim,
-                "match_percentage":  (sim.clamp(0.0, 0.99) * 100.0).round() as u32,
+                "match_percentage":  match_percent(sim),
                 "vibe_pills":        pills,
             })
         })
@@ -180,4 +202,23 @@ pub async fn recommendations(
         "recommendations": results.clone(),
         "results": results,
     }))
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::match_percent;
+
+    #[test]
+    fn match_reads_on_the_measured_scale() {
+        assert_eq!(match_percent(0.0), 60);
+        assert_eq!(match_percent(0.455), 80);
+        assert_eq!(match_percent(0.532), 92);
+        assert_eq!(match_percent(1.0), 99);
+        let mut last = 0;
+        for k in 0..=100 {
+            let m = match_percent(k as f32 / 100.0);
+            assert!(m >= last, "the scale only rises");
+            last = m;
+        }
+    }
 }
